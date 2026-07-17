@@ -1,0 +1,47 @@
+{
+  "license": {
+    "key": ""
+  },
+
+  "broker": {
+    "type": "topstepx",
+    "username": "",
+    "symbol": "ES",
+    "accounts": [
+      { "name": "Account-1", "apiKey": "" }
+    ]
+  },
+
+  "trading": {
+    "contracts":        2,
+    "stopLossTicks":   10,
+    "maxStopTicks":    20,
+    "takeProfitTicks": 40,
+    "trailTicks":       8,
+    "dailyLossLimit":  1400,
+    "dailyProfitCap":  2000,
+    "atrMinFilter":    2.0
+  },
+
+  "strategies": {
+    "AVWAP_L":     true,
+    "EMAPB_L":     true,
+    "EMAPB_S":     true,
+    "RSI2_L":      true,
+    "RSI2_S":      true,
+    "3BAR_BEAR_S": true
+  },
+
+  "trendFilter": {
+    "enabled":            true,
+    "uptrendThreshold":   10,
+    "downtrendThreshold":  6
+  },
+
+  "notifications": {
+    "enabled":     false,
+    "ntfyChannel": ""
+  },
+
+  "_machineId": ""
+}

@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ES Futures Bot — Setup</title>
+<link rel="stylesheet" href="style.css">
+<style>
+  /* ── Setup-specific overrides ──────────────────────────────────────────── */
+  body { overflow: auto; }
+
+  #setup-wrap {
+    position: relative;
+    z-index: 5;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    min-height: calc(100vh - 38px);
+    padding: 32px 24px 40px;
+  }
+
+  .setup-logo {
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: 0.2em;
+    color: var(--green-hi);
+    margin-bottom: 4px;
+    text-align: center;
+  }
+
+  .setup-sub {
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    color: var(--text-dim);
+    margin-bottom: 32px;
+    text-align: center;
+  }
+
+  /* ── Steps indicator ───────────────────────────────────────────────────── */
+  #steps-bar {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 28px;
+  }
+
+  .step-pip {
+    width: 28px;
+    height: 3px;
+    background: var(--panel-bdr);
+    transition: background 0.3s;
+  }
+
+  .step-pip.done   { background: var(--green-lo); }
+  .step-pip.active { background: var(--green-hi); }
+
+  /* ── Card ──────────────────────────────────────────────────────────────── */
+  .setup-card {
+    width: 100%;
+    max-width: 480px;
+    border: 1px solid var(--panel-bdr);
+    background: rgba(0,8,0,0.9);
+    padding: 24px 28px;
+  }
+
+  .card-title {
+    font-size: 11px;
+    letter-spacing: 0.18em;
+    color: var(--text-dim);
+    margin-bottom: 18px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--panel-bdr);
+  }
+
+  .form-group {
+    margin-bottom: 16px;
+  }
+
+  .form-group label {
+    display: block;
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    color: var(--text-dim);
+    margin-bottom: 5px;
+  }
+
+  .form-group input[type="text"],
+  .form-group input[type="password"],
+  .form-group input[type="number"] {
+    width: 100%;
+    background: var(--black);
+    border: 1px solid var(--panel-bdr);
+    color: var(--green-hi);
+    font-family: var(--font);
+    font-size: 12px;
+    padding: 7px 10px;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+
+  .form-group input:focus {
+    border-color: var(--green-lo);
+  }
+
+  .form-group .hint {
+    font-size: 10px;
+    color: var(--text-dim);
+    margin-top: 4px;
+  }
+
+  /* ── Account rows ─────────────────────────────────────────────────────── */
+  .acct-entry {
+    border: 1px solid var(--panel-bdr);
+    padding: 12px;
+    margin-bottom: 10px;
+    background: rgba(0,15,0,0.4);
+  }
+
+  .acct-entry .acct-num {
+    font-size: 10px;
+    color: var(--text-dim);
+    letter-spacing: 0.1em;
+    margin-bottom: 10px;
+  }
+
+  .add-acct-btn {
+    background: none;
+    border: 1px dashed var(--panel-bdr);
+    color: var(--text-dim);
+    font-family: var(--font);
+    font-size: 11px;
+    width: 100%;
+    padding: 8px;
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s;
+    margin-bottom: 4px;
+  }
+
+  .add-acct-btn:hover { color: var(--green-med); border-color: var(--green-lo); }
+
+  /* ── Navigation ───────────────────────────────────────────────────────── */
+  .setup-nav {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 20px;
+    gap: 10px;
+  }
+
+  .btn-back {
+    background: none;
+    border: 1px solid var(--panel-bdr);
+    color: var(--text-dim);
+    font-family: var(--font);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    padding: 8px 20px;
+    cursor: pointer;
+    flex: 1;
+    transition: color 0.15s;
+  }
+
+  .btn-back:hover { color: var(--green-lo); }
+
+  .btn-next {
+    background: none;
+    border: 1px solid var(--green-lo);
+    color: var(--green-hi);
+    font-family: var(--font);
+    font-size: 11px;
+    letter-spacing: 0.15em;
+    padding: 8px 20px;
+    cursor: pointer;
+    flex: 2;
+    transition: box-shadow 0.2s, border-color 0.2s;
+  }
+
+  .btn-next:hover {
+    border-color: var(--green-med);
+    box-shadow: 0 0 10px rgba(0,255,65,0.25);
+  }
+
+  .error-msg {
+    color: var(--red);
+    font-size: 10px;
+    margin-top: 8px;
+    display: none;
+  }
+  .error-msg.show { display: block; }
+
+  .setup-step { display: none; }
+  .setup-step.active { display: block; }
+
+  .license-input-area {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+  }
+
+  .license-input-area input {
+    flex: 1;
+    background: var(--black);
+    border: 1px solid var(--panel-bdr);
+    color: var(--green-hi);
+    font-family: var(--font);
+    font-size: 12px;
+    padding: 7px 10px;
+    outline: none;
+  }
+
+  .license-input-area input:focus { border-color: var(--green-lo); }
+
+  .btn-verify {
+    background: none;
+    border: 1px solid var(--green-lo);
+    color: var(--green-hi);
+    font-family: var(--font);
+    font-size: 11px;
+    padding: 7px 14px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: box-shadow 0.2s;
+  }
+
+  .btn-verify:hover { box-shadow: 0 0 8px rgba(0,255,65,0.2); }
+
+  .verified-badge {
+    color: var(--green-hi);
+    font-size: 11px;
+    margin-top: 8px;
+    display: none;
+  }
+
+  .verified-badge.show { display: block; }
+
+  .summary-table { width: 100%; }
+  .summary-table td { padding: 4px 0; font-size: 11px; }
+  .summary-table td:first-child { color: var(--text-dim); width: 40%; }
+  .summary-table td:last-child  { color: var(--green-med); word-break: break-all; }
+</style>
+</head>
+<body>
+
+<canvas id="rain"></canvas>
+
+<div id="titlebar">
+  <div id="titlebar-left">
+    <span class="title-logo">⬡</span>
+    <span class="title-name">ES FUTURES BOT</span>
+    <span class="title-ver">SETUP</span>
+  </div>
+  <div id="titlebar-right">
+    <button class="wbtn wbtn-close" onclick="window.bot?.close()">✕</button>
+  </div>
+</div>
+
+<div id="setup-wrap">
+
+  <div class="setup-logo" id="setup-logo">ES FUTURES BOT</div>
+  <div class="setup-sub">FIRST-RUN CONFIGURATION</div>
+
+  <div id="steps-bar">
+    <div class="step-pip active" id="pip-0"></div>
+    <div class="step-pip"        id="pip-1"></div>
+    <div class="step-pip"        id="pip-2"></div>
+    <div class="step-pip"        id="pip-3"></div>
+  </div>
+
+  <!-- ── Step 0: License ─────────────────────────────────────────────────── -->
+  <div class="setup-card setup-step active" id="step-0">
+    <div class="card-title">STEP 1 OF 4 — LICENSE</div>
+
+    <p style="font-size:11px;color:var(--green-lo);margin-bottom:16px;line-height:1.7">
+      Enter the license key from your Gumroad purchase confirmation email.
+    </p>
+
+    <div class="form-group">
+      <label>LICENSE KEY</label>
+      <div class="license-input-area">
+        <input type="text" id="lic-key" placeholder="XXXX-XXXX-XXXX-XXXX" spellcheck="false">
+        <button class="btn-verify" id="btn-verify-lic">VERIFY</button>
+      </div>
+      <div class="hint">Found in your Gumroad purchase email.</div>
+    </div>
+
+    <div class="verified-badge" id="verified-badge">✓ License verified</div>
+    <div class="error-msg" id="lic-error"></div>
+
+    <div class="setup-nav">
+      <button class="btn-next" id="next-0">NEXT →</button>
+    </div>
+  </div>
+
+  <!-- ── Step 1: Broker / username ───────────────────────────────────────── -->
+  <div class="setup-card setup-step" id="step-1">
+    <div class="card-title">STEP 2 OF 4 — BROKER</div>
+
+    <div class="form-group">
+      <label>TOPSTEPX USERNAME / EMAIL</label>
+      <input type="text" id="broker-user" placeholder="your@email.com" spellcheck="false">
+      <div class="hint">Your TopstepX account login email.</div>
+    </div>
+
+    <div class="form-group">
+      <label>SYMBOL</label>
+      <input type="text" id="broker-symbol" value="ES" placeholder="ES">
+      <div class="hint">Futures contract symbol. Default: ES (S&amp;P 500).</div>
+    </div>
+
+    <div class="error-msg" id="broker-error"></div>
+
+    <div class="setup-nav">
+      <button class="btn-back" onclick="goStep(0)">← BACK</button>
+      <button class="btn-next" id="next-1">NEXT →</button>
+    </div>
+  </div>
+
+  <!-- ── Step 2: Accounts (API keys) ──────────────────────────────────────── -->
+  <div class="setup-card setup-step" id="step-2">
+    <div class="card-title">STEP 3 OF 4 — ACCOUNTS</div>
+
+    <p style="font-size:11px;color:var(--green-lo);margin-bottom:14px;line-height:1.7">
+      Add one account per TopstepX combine. Each needs its own API key from the ProjectX portal.
+    </p>
+
+    <div id="acct-entries"></div>
+    <button class="add-acct-btn" id="add-acct-btn">+ ADD ACCOUNT</button>
+
+    <div class="error-msg" id="acct-error"></div>
+
+    <div class="setup-nav">
+      <button class="btn-back" onclick="goStep(1)">← BACK</button>
+      <button class="btn-next" id="next-2">NEXT →</button>
+    </div>
+  </div>
+
+  <!-- ── Step 3: Notifications + confirm ──────────────────────────────────── -->
+  <div class="setup-card setup-step" id="step-3">
+    <div class="card-title">STEP 4 OF 4 — NOTIFICATIONS &amp; CONFIRM</div>
+
+    <div class="form-group">
+      <label>NTFY.SH CHANNEL (OPTIONAL)</label>
+      <input type="text" id="ntfy-channel" placeholder="my-bot-alerts" spellcheck="false">
+      <div class="hint">Free push notifications to your phone. Leave blank to skip.</div>
+    </div>
+
+    <div style="margin-top:16px; margin-bottom:8px;" class="card-title">REVIEW</div>
+    <table class="summary-table" id="summary-table"></table>
+
+    <div class="error-msg" id="confirm-error"></div>
+
+    <div class="setup-nav">
+      <button class="btn-back" onclick="goStep(2)">← BACK</button>
+      <button class="btn-next" id="next-3">LAUNCH BOT →</button>
+    </div>
+  </div>
+
+</div>
+
+<script src="app.js"></script>
+<script>
+/* ── Setup wizard logic ──────────────────────────────────────────────────── */
+let currentStep = 0;
+let licenseVerified = false;
+const setupData = { license: "", username: "", symbol: "ES", accounts: [], ntfy: "" };
+
+/* -- Step navigation -- */
+function goStep(n) {
+  document.getElementById(`step-${currentStep}`).classList.remove("active");
+  currentStep = n;
+  document.getElementById(`step-${currentStep}`).classList.add("active");
+  updatePips();
+}
+
+function updatePips() {
+  [0,1,2,3].forEach(i => {
+    const pip = document.getElementById(`pip-${i}`);
+    pip.className = "step-pip";
+    if (i < currentStep)  pip.classList.add("done");
+    if (i === currentStep) pip.classList.add("active");
+  });
+}
+
+function showError(id, msg) {
+  const el = document.getElementById(id);
+  el.textContent = msg;
+  el.classList.add("show");
+}
+
+function clearError(id) {
+  const el = document.getElementById(id);
+  el.textContent = "";
+  el.classList.remove("show");
+}
+
+/* -- License step -- */
+document.getElementById("btn-verify-lic").addEventListener("click", async () => {
+  const key = document.getElementById("lic-key").value.trim();
+  if (!key) { showError("lic-error", "Enter a license key."); return; }
+  clearError("lic-error");
+
+  const btn = document.getElementById("btn-verify-lic");
+  btn.textContent = "...";
+  btn.disabled = true;
+
+  try {
+    let result;
+    if (window.bot) {
+      result = await window.bot.verifyLicense(key);
+    } else {
+      // In browser preview: simulate
+      result = { valid: true, email: "preview@local" };
+    }
+
+    if (result.valid) {
+      licenseVerified = true;
+      setupData.license = key;
+      document.getElementById("verified-badge").classList.add("show");
+      clearError("lic-error");
+    } else {
+      showError("lic-error", result.reason || "License invalid.");
+    }
+  } catch (e) {
+    showError("lic-error", "Could not reach license server.");
+  } finally {
+    btn.textContent = "VERIFY";
+    btn.disabled = false;
+  }
+});
+
+document.getElementById("next-0").addEventListener("click", () => {
+  if (!licenseVerified) {
+    showError("lic-error", "Verify your license key first.");
+    return;
+  }
+  clearError("lic-error");
+  goStep(1);
+});
+
+/* -- Broker step -- */
+document.getElementById("next-1").addEventListener("click", () => {
+  const user   = document.getElementById("broker-user").value.trim();
+  const symbol = document.getElementById("broker-symbol").value.trim() || "ES";
+
+  if (!user) { showError("broker-error", "Enter your TopstepX username."); return; }
+  clearError("broker-error");
+
+  setupData.username = user;
+  setupData.symbol   = symbol;
+  ensureOneAccount();
+  goStep(2);
+});
+
+/* -- Accounts step -- */
+function ensureOneAccount() {
+  if (document.querySelectorAll(".acct-entry").length === 0) addAccount();
+}
+
+let acctCount = 0;
+
+function addAccount() {
+  if (acctCount >= 10) return;
+  acctCount++;
+  const idx = acctCount;
+  const div = document.createElement("div");
+  div.className = "acct-entry";
+  div.dataset.idx = idx;
+  div.innerHTML = `
+    <div class="acct-num">ACCOUNT ${idx}</div>
+    <div class="form-group">
+      <label>NAME / LABEL</label>
+      <input type="text" placeholder="Combine 1" class="acct-name-input">
+    </div>
+    <div class="form-group">
+      <label>API KEY</label>
+      <input type="password" placeholder="ProjectX API key" class="acct-key-input" spellcheck="false">
+    </div>
+  `;
+  document.getElementById("acct-entries").appendChild(div);
+}
+
+document.getElementById("add-acct-btn").addEventListener("click", () => {
+  if (acctCount >= 10) { showError("acct-error", "Maximum 10 accounts."); return; }
+  addAccount();
+  clearError("acct-error");
+});
+
+document.getElementById("next-2").addEventListener("click", () => {
+  const entries = document.querySelectorAll(".acct-entry");
+  const accounts = [];
+
+  for (const entry of entries) {
+    const name = entry.querySelector(".acct-name-input").value.trim();
+    const key  = entry.querySelector(".acct-key-input").value.trim();
+    if (!name || !key) {
+      showError("acct-error", `Fill in name and API key for all accounts.`);
+      return;
+    }
+    accounts.push({ name, apiKey: key });
+  }
+
+  if (accounts.length === 0) { showError("acct-error", "Add at least one account."); return; }
+  clearError("acct-error");
+
+  setupData.accounts = accounts;
+  buildSummary();
+  goStep(3);
+});
+
+/* -- Notifications + confirm step -- */
+function buildSummary() {
+  const tbl = document.getElementById("summary-table");
+  tbl.innerHTML = `
+    <tr><td>License</td><td>${setupData.license.slice(0,8)}…</td></tr>
+    <tr><td>Username</td><td>${setupData.username}</td></tr>
+    <tr><td>Symbol</td><td>${setupData.symbol}</td></tr>
+    <tr><td>Accounts</td><td>${setupData.accounts.map(a => a.name).join(", ")}</td></tr>
+  `;
+}
+
+document.getElementById("next-3").addEventListener("click", async () => {
+  setupData.ntfy = document.getElementById("ntfy-channel").value.trim();
+
+  const config = {
+    license:  { key: setupData.license },
+    broker: {
+      username: setupData.username,
+      symbol:   setupData.symbol,
+      accounts: setupData.accounts,
+    },
+    notifications: {
+      ntfyChannel: setupData.ntfy || null,
+    },
+  };
+
+  const btn = document.getElementById("next-3");
+  btn.textContent = "SAVING...";
+  btn.disabled = true;
+
+  try {
+    if (window.bot) {
+      const result = await window.bot.saveConfig(config);
+      if (!result.ok) {
+        showError("confirm-error", result.error || "Failed to save config.");
+        return;
+      }
+      window.bot.setupComplete();
+    } else {
+      // Browser preview
+      alert("Setup complete (preview mode).");
+    }
+  } catch (e) {
+    showError("confirm-error", e.message || "Unexpected error.");
+  } finally {
+    btn.textContent = "LAUNCH BOT →";
+    btn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,177 @@
+//@version=5
+strategy("Multi-Strategy v3 (7 strategies, concurrent)", overlay=true, initial_capital=25000, default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=8, commission_type=strategy.commission.cash_per_contract, commission_value=2.50, calc_on_every_tick=false, process_orders_on_close=true)
+
+// ─── Risk ────────────────────────────────────────────────────────────────
+stopTicks = input.int(10, "Stop ticks",  minval=1)
+tgtTicks  = input.int(20, "Target ticks", minval=1)
+tickSize  = input.float(0.25, "Tick size")
+
+// ─── Strategy toggles ────────────────────────────────────────────────────
+useTJR    = input.bool(true, "TJR")
+useORB    = input.bool(true, "ORB")
+useICT    = input.bool(true, "ICT")
+useAVWAP  = input.bool(true, "AVWAP")
+useRSI2   = input.bool(true, "RSI2 Reversal (Connors)")
+useEMAPB  = input.bool(true, "EMA21 Pullback (Minervini)")
+useBBSQ   = input.bool(true, "Bollinger Squeeze Breakout")
+
+// ─── Common filters ──────────────────────────────────────────────────────
+useRSI    = input.bool(true, "RSI(14) filter for trend strats")
+rsiLow    = input.int(30, "RSI low")
+rsiHigh   = input.int(70, "RSI high")
+useVWAP   = input.bool(true, "VWAP filter")
+
+sessStart = input.int(1330, "Session start HHMM (UTC)")
+sessEnd   = input.int(1500, "Session end HHMM (UTC)")
+orbBars   = input.int(3, "ORB bars (5m)")
+
+// RSI2 thresholds
+rsi2Buy   = input.int(10, "RSI2 oversold (long)")
+rsi2Sell  = input.int(90, "RSI2 overbought (short)")
+// BB squeeze
+bbLen     = input.int(20, "BB length")
+bbMult    = input.float(2.0, "BB mult")
+sqLook    = input.int(120, "BB width lookback for squeeze")
+
+// ─── Indicators ──────────────────────────────────────────────────────────
+rsi    = ta.rsi(close, 14)
+rsi2   = ta.rsi(close, 2)
+vwap   = ta.vwap(hlc3)
+ema200 = ta.ema(close, 200)
+ema21  = ta.ema(close, 21)
+ema13  = ta.ema(close, 13)
+ema50  = ta.ema(close, 50)
+bbBasis = ta.sma(close, bbLen)
+bbDev   = bbMult * ta.stdev(close, bbLen)
+bbUp    = bbBasis + bbDev
+bbDn    = bbBasis - bbDev
+bbWidth = bbUp - bbDn
+isSqueeze = bbWidth <= ta.lowest(bbWidth, sqLook)
+
+hm      = hour(time) * 100 + minute(time)
+inSess  = hm >= sessStart and hm < sessEnd
+prevIn  = hm[1] >= sessStart and hm[1] < sessEnd
+newSess = inSess and not prevIn
+
+var float orbHi = na
+var float orbLo = na
+var int   orbCnt = 0
+if newSess
+    orbHi := high
+    orbLo := low
+    orbCnt := 1
+else if inSess and orbCnt < orbBars
+    orbHi := math.max(orbHi, high)
+    orbLo := math.min(orbLo, low)
+    orbCnt += 1
+orbReady = inSess and orbCnt >= orbBars
+
+swingHi = ta.pivothigh(high, 5, 5)
+swingLo = ta.pivotlow(low, 5, 5)
+var float lastSH  = na
+var float lastSH2 = na
+var float lastSL  = na
+var float lastSL2 = na
+if not na(swingHi)
+    lastSH2 := lastSH
+    lastSH  := swingHi
+if not na(swingLo)
+    lastSL2 := lastSL
+    lastSL  := swingLo
+bosUp = not na(lastSH) and not na(lastSH2) and lastSH > lastSH2
+bosDn = not na(lastSL) and not na(lastSL2) and lastSL < lastSL2
+
+rsiOK  = not useRSI  or (rsi > rsiLow and rsi < rsiHigh)
+aboveV = not useVWAP or close > vwap
+belowV = not useVWAP or close < vwap
+
+// ─── Original 4 strategies ───────────────────────────────────────────────
+sweepLo = low  < ta.lowest(low, 20)[1]   and close > ta.lowest(low, 20)[1]
+sweepHi = high > ta.highest(high, 20)[1] and close < ta.highest(high, 20)[1]
+tjrLong  = useTJR and inSess and sweepLo and bosUp and aboveV and rsiOK
+tjrShort = useTJR and inSess and sweepHi and bosDn and belowV and rsiOK
+
+orbLong  = useORB and orbReady and open > orbHi and close > orbHi and ema13 > ema50 and close > ema200 and rsiOK
+orbShort = useORB and orbReady and open < orbLo and close < orbLo and ema13 < ema50 and close < ema200 and rsiOK
+
+bullFVG = low  > high[2]
+bearFVG = high < low[2]
+ictLong  = useICT and inSess and bullFVG[1] and low  <= high[3] and close > high[3] and aboveV and rsiOK
+ictShort = useICT and inSess and bearFVG[1] and high >= low[3]  and close < low[3]  and belowV and rsiOK
+
+touchVup = low  <= vwap and close > vwap
+touchVdn = high >= vwap and close < vwap
+avwapLong  = useAVWAP and inSess and touchVup and ema13 > ema50 and rsi > 30 and rsi < 60
+avwapShort = useAVWAP and inSess and touchVdn and ema13 < ema50 and rsi > 40 and rsi < 70
+
+// ─── NEW: RSI(2) reversal (Connors) ──────────────────────────────────────
+rsi2Long  = useRSI2 and inSess and rsi2 < rsi2Buy  and close > ema200
+rsi2Short = useRSI2 and inSess and rsi2 > rsi2Sell and close < ema200
+
+// ─── NEW: EMA21 pullback (Minervini) ─────────────────────────────────────
+bullCandle = close > open and close > close[1]
+bearCandle = close < open and close < close[1]
+nearEma21Up = low  <= ema21 and close > ema21
+nearEma21Dn = high >= ema21 and close < ema21
+emapbLong  = useEMAPB and inSess and close > ema200 and ema21 > ema50 and nearEma21Up and bullCandle and rsiOK
+emapbShort = useEMAPB and inSess and close < ema200 and ema21 < ema50 and nearEma21Dn and bearCandle and rsiOK
+
+// ─── NEW: Bollinger Squeeze Breakout ─────────────────────────────────────
+bbsqLong  = useBBSQ and inSess and isSqueeze[1] and close > bbUp[1]  and close > ema200 and rsiOK
+bbsqShort = useBBSQ and inSess and isSqueeze[1] and close < bbDn[1]  and close < ema200 and rsiOK
+
+// ─── Concurrent entries ──────────────────────────────────────────────────
+stopDist = stopTicks * tickSize
+tgtDist  = tgtTicks  * tickSize
+
+isOpen(id) =>
+    found = false
+    for i = 0 to math.max(strategy.opentrades - 1, 0)
+        if strategy.opentrades.entry_id(i) == id
+            found := true
+    found
+
+placeLong(id) =>
+    strategy.entry(id, strategy.long)
+    strategy.exit("X-"+id, from_entry=id, stop=close-stopDist, limit=close+tgtDist)
+placeShort(id) =>
+    strategy.entry(id, strategy.short)
+    strategy.exit("X-"+id, from_entry=id, stop=close+stopDist, limit=close-tgtDist)
+
+if tjrLong    and not isOpen("TJR_L")
+    placeLong("TJR_L")
+if tjrShort   and not isOpen("TJR_S")
+    placeShort("TJR_S")
+if orbLong    and not isOpen("ORB_L")
+    placeLong("ORB_L")
+if orbShort   and not isOpen("ORB_S")
+    placeShort("ORB_S")
+if ictLong    and not isOpen("ICT_L")
+    placeLong("ICT_L")
+if ictShort   and not isOpen("ICT_S")
+    placeShort("ICT_S")
+if avwapLong  and not isOpen("AVWAP_L")
+    placeLong("AVWAP_L")
+if avwapShort and not isOpen("AVWAP_S")
+    placeShort("AVWAP_S")
+if rsi2Long   and not isOpen("RSI2_L")
+    placeLong("RSI2_L")
+if rsi2Short  and not isOpen("RSI2_S")
+    placeShort("RSI2_S")
+if emapbLong  and not isOpen("EMAPB_L")
+    placeLong("EMAPB_L")
+if emapbShort and not isOpen("EMAPB_S")
+    placeShort("EMAPB_S")
+if bbsqLong   and not isOpen("BBSQ_L")
+    placeLong("BBSQ_L")
+if bbsqShort  and not isOpen("BBSQ_S")
+    placeShort("BBSQ_S")
+
+if not inSess and strategy.position_size != 0
+    strategy.close_all(comment="EOS")
+
+plot(vwap,   "VWAP",   color=color.orange)
+plot(ema21,  "EMA21",  color=color.fuchsia)
+plot(ema200, "EMA200", color=color.red)
+plot(bbUp,   "BB Up",  color=color.gray)
+plot(bbDn,   "BB Dn",  color=color.gray)

@@ -1,0 +1,32 @@
+[
+  {
+    "name":         "Account-1-50K",
+    "TV_USER":      "your@email.com",
+    "TV_API_KEY":   "api-key-for-account-1",
+    "NTFY_CHANNEL": "your-ntfy-channel-acct1"
+  },
+  {
+    "name":         "Account-2-50K",
+    "TV_USER":      "your@email.com",
+    "TV_API_KEY":   "api-key-for-account-2",
+    "NTFY_CHANNEL": "your-ntfy-channel-acct2"
+  },
+  {
+    "name":         "Account-3-50K",
+    "TV_USER":      "your@email.com",
+    "TV_API_KEY":   "api-key-for-account-3",
+    "NTFY_CHANNEL": "your-ntfy-channel-acct3"
+  },
+  {
+    "name":         "Account-4-50K",
+    "TV_USER":      "your@email.com",
+    "TV_API_KEY":   "api-key-for-account-4",
+    "NTFY_CHANNEL": "your-ntfy-channel-acct4"
+  },
+  {
+    "name":         "Account-5-50K",
+    "TV_USER":      "your@email.com",
+    "TV_API_KEY":   "api-key-for-account-5",
+    "NTFY_CHANNEL": "your-ntfy-channel-acct5"
+  }
+]

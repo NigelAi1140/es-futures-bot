@@ -1,0 +1,48 @@
+{
+  "name": "es-futures-bot",
+  "version": "1.0.0",
+  "description": "ES Futures algorithmic trading bot for TopstepX combines",
+  "main": "electron/main.js",
+  "scripts": {
+    "start":     "electron .",
+    "dev":       "DEV_LICENSE=1 electron .",
+    "build:mac": "electron-builder --mac",
+    "build:win": "electron-builder --win",
+    "build:all": "electron-builder --mac --win"
+  },
+  "dependencies": {
+    "@microsoft/signalr": "^8.0.0",
+    "axios": "^1.7.0"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.0"
+  },
+  "build": {
+    "appId": "com.esfuturesbot.app",
+    "productName": "ES Futures Bot",
+    "files": [
+      "electron/**/*",
+      "src/**/*",
+      "config.default.json",
+      "README.txt",
+      "!**/node_modules/**"
+    ],
+    "extraFiles": [
+      { "from": "../engine", "to": "engine", "filter": ["topstepx-engine.js","strategies.js","indicators.js"] }
+    ],
+    "mac": {
+      "category": "public.app-category.finance",
+      "icon": "assets/icon.icns",
+      "target": [{ "target": "dmg", "arch": ["arm64","x64"] }]
+    },
+    "win": {
+      "icon": "assets/icon.ico",
+      "target": [{ "target": "nsis", "arch": ["x64"] }]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

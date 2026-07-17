@@ -1,4 +1,55 @@
+# Credentials & secrets
+accounts.json
+config.json
 .env
-*.log
-safety-check-log.json
+*.key
+
+# Node
 node_modules/
+npm-debug.log*
+
+# Logs & trade data
+*.log
+logs/
+trade_log.txt
+trades.csv
+trading-log.txt
+safety-check-log.json
+
+# Personal backtest scripts
+backtest-*.mjs
+backtest-*.mjs.bak*
+backtest.mjs
+backtest.py
+topstepx-backtest.mjs
+trend-backtest*.mjs
+week-backtest*.mjs
+forward-tracker.js
+
+# Personal / dev scripts
+bot.js
+bridge.js
+ibkr-*.js
+tws-*.js
+price-watcher.js
+reset-indicators.js
+navigate-to-chart.js
+check-contract-roll.mjs
+test-bracket.mjs
+ensure-*.sh
+startup.sh
+watchdog.sh
+
+# Misc
+ES.txt
+*.bak
+*.bak2
+docs/
+prompts/
+ninjatrader/
+railway.json
+rules.json
+
+# Electron build output
+product/dist/
+product/out/

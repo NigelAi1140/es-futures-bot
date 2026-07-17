@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ES Futures Bot</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- Matrix rain canvas (background layer) -->
+<canvas id="rain"></canvas>
+
+<!-- Custom title bar / drag region -->
+<div id="titlebar">
+  <div id="titlebar-left">
+    <span class="title-logo">⬡</span>
+    <span class="title-name">ES FUTURES BOT</span>
+    <span class="title-ver" id="app-version">v1.0.0</span>
+  </div>
+  <div id="titlebar-right">
+    <span id="conn-dot" class="dot dot-off" title="Connection"></span>
+    <button class="wbtn wbtn-settings" id="btn-settings" title="Settings" onclick="openSettings()">⚙</button>
+    <button class="wbtn wbtn-pause" id="btn-pause" title="Pause all engines" onclick="togglePause()">⏸</button>
+    <button class="wbtn" id="btn-minimize" onclick="window.bot?.minimize()">─</button>
+    <button class="wbtn wbtn-close" id="btn-close" onclick="window.bot?.close()">✕</button>
+  </div>
+</div>
+
+<!-- License check overlay -->
+<div id="overlay-license" class="overlay" hidden>
+  <div class="overlay-box">
+    <div class="overlay-title">ACCESS DENIED</div>
+    <div class="overlay-body" id="license-reason"></div>
+    <button class="btn-primary" onclick="window.bot?.close()">EXIT</button>
+  </div>
+</div>
+
+<!-- Settings overlay -->
+<div id="overlay-settings" class="overlay" hidden>
+  <div class="overlay-box settings-box">
+    <div class="settings-header">
+      <span class="overlay-title" style="margin:0">SETTINGS</span>
+      <button class="wbtn wbtn-close" onclick="closeSettings()" style="-webkit-app-region:no-drag">✕</button>
+    </div>
+
+    <div class="settings-body">
+      <!-- Left column -->
+      <div class="settings-col">
+        <div class="settings-section-label">RISK</div>
+        <label class="field-row">
+          <span class="field-k">Daily Loss Limit</span>
+          <span class="field-unit">$<input class="field-v" type="number" id="cfg-daily-loss" min="100" max="5000"></span>
+        </label>
+        <label class="field-row">
+          <span class="field-k">Daily Profit Cap</span>
+          <span class="field-unit">$<input class="field-v" type="number" id="cfg-profit-cap" min="100" max="5000"></span>
+        </label>
+        <label class="field-row">
+          <span class="field-k">Max Contracts</span>
+          <input class="field-v field-v-sm" type="number" id="cfg-contracts" min="1" max="10">
+        </label>
+
+        <div class="settings-section-label" style="margin-top:18px">ORDERS</div>
+        <label class="field-row">
+          <span class="field-k">Stop Loss Ticks</span>
+          <input class="field-v field-v-sm" type="number" id="cfg-stop" min="5" max="20">
+        </label>
+        <label class="field-row">
+          <span class="field-k">Max Stop Ticks</span>
+          <input class="field-v field-v-sm" type="number" id="cfg-max-stop" min="10" max="60">
+        </label>
+        <label class="field-row">
+          <span class="field-k">Take Profit Ticks</span>
+          <input class="field-v field-v-sm" type="number" id="cfg-tp" min="20" max="100">
+        </label>
+        <label class="field-row">
+          <span class="field-k">Trail Ticks</span>
+          <input class="field-v field-v-sm" type="number" id="cfg-trail" min="4" max="20">
+        </label>
+      </div>
+
+      <!-- Right column -->
+      <div class="settings-col">
+        <div class="settings-section-label">STRATEGIES</div>
+        <div id="settings-strategies">
+          <!-- Populated by JS from loaded config -->
+        </div>
+
+        <div class="settings-section-label" style="margin-top:18px">TREND FILTER</div>
+        <label class="field-row">
+          <span class="field-k">Enabled</span>
+          <input class="field-toggle" type="checkbox" id="cfg-trend-enabled">
+        </label>
+        <label class="field-row">
+          <span class="field-k">Uptrend Pts</span>
+          <input class="field-v field-v-sm" type="number" id="cfg-trend-up" min="3" max="30">
+        </label>
+        <label class="field-row">
+          <span class="field-k">Downtrend Pts</span>
+          <input class="field-v field-v-sm" type="number" id="cfg-trend-dn" min="3" max="30">
+        </label>
+      </div>
+    </div>
+
+    <div class="settings-msg" id="settings-msg"></div>
+
+    <div class="settings-footer">
+      <button class="btn-secondary" onclick="closeSettings()">CANCEL</button>
+      <button class="btn-primary btn-save" id="btn-save-cfg" onclick="saveSettings()">SAVE &amp; RESTART</button>
+    </div>
+  </div>
+</div>
+
+<!-- Main content -->
+<div id="content">
+
+  <!-- Left sidebar: account panels -->
+  <div id="sidebar">
+    <div class="sidebar-label">ACCOUNTS</div>
+
+    <!-- Combined daily P&L -->
+    <div id="total-pnl-bar">
+      <span class="total-pnl-k">DAILY P&L</span>
+      <span class="total-pnl-v" id="total-pnl">—</span>
+    </div>
+
+    <div id="account-list">
+      <!-- Populated by JS -->
+    </div>
+
+    <div class="sidebar-label" style="margin-top:20px">SESSION</div>
+    <div id="session-info">
+      <div class="info-row"><span class="info-k">Trend</span><span class="info-v" id="trend-status">—</span></div>
+      <div class="info-row"><span class="info-k">Strategies</span><span class="info-v" id="strat-count">—</span></div>
+      <div class="info-row"><span class="info-k">Contracts</span><span class="info-v" id="contracts">—</span></div>
+      <div class="info-row"><span class="info-k">Stop / TP</span><span class="info-v" id="sl-tp">—</span></div>
+    </div>
+
+    <div class="sidebar-label" style="margin-top:20px">RISK</div>
+    <div id="risk-info">
+      <div class="info-row"><span class="info-k">Daily limit</span><span class="info-v" id="daily-limit">—</span></div>
+      <div class="info-row"><span class="info-k">Profit cap</span><span class="info-v" id="profit-cap">—</span></div>
+    </div>
+
+    <div id="sidebar-footer">
+      <span id="license-user">—</span>
+    </div>
+  </div>
+
+  <!-- Right panel: live log -->
+  <div id="main">
+    <div id="log-header">
+      <span class="log-label">LIVE LOG</span>
+      <div class="log-filters" id="log-filters">
+        <button class="filter-btn active" data-filter="all"    onclick="setFilter('all')">ALL</button>
+        <button class="filter-btn"        data-filter="trades" onclick="setFilter('trades')">TRADES</button>
+        <button class="filter-btn"        data-filter="errors" onclick="setFilter('errors')">ERRORS</button>
+      </div>
+      <button class="log-btn" id="btn-clear" onclick="clearLog()">CLEAR</button>
+      <label class="log-btn">
+        <input type="checkbox" id="chk-scroll" checked> AUTO SCROLL
+      </label>
+    </div>
+    <div id="log" role="log" aria-live="polite"></div>
+  </div>
+
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
