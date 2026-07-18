@@ -731,6 +731,12 @@ body.is-mac #btn-minimize         { display: none; }
   animation: pill-float 3.2s ease-in-out infinite;
 }
 
+/* Relative container so pill can sit on the palm */
+.hand-wrap {
+  position: relative;
+  display: inline-block;
+}
+
 @keyframes pill-float {
   0%, 100% { transform: translateY(0); }
   50%       { transform: translateY(-7px); }
@@ -750,8 +756,15 @@ body.is-mac #btn-minimize         { display: none; }
   border-radius: 14px;
   overflow: hidden;
   position: relative;
-  margin-bottom: 6px;
   flex-shrink: 0;
+}
+
+/* Pill resting on the palm — palm center is at y=115 of 172 SVG height = 66.9% */
+.pill-cap.on-palm {
+  position: absolute;
+  left: 50%;
+  top: 67%;
+  transform: translate(-50%, -50%);
 }
 
 .pill-blue {
