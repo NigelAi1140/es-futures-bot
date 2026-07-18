@@ -279,6 +279,7 @@ function openSettings() {
     setValue("cfg-max-stop",   t.maxStopTicks);
     setValue("cfg-tp",         t.takeProfitTicks);
     setValue("cfg-trail",      t.trailTicks);
+    setStopMode(t.stopMode ?? "trail");
 
     setCheck("cfg-trend-enabled", f.enabled ?? true);
     setValue("cfg-trend-up",  f.uptrendThreshold);
@@ -291,12 +292,14 @@ function openSettings() {
       const label = document.createElement("label");
       label.className = "strat-row";
       label.innerHTML = `<input type="checkbox" data-strat="${name}"${enabled ? " checked" : ""}> ${name}`;
+      label.querySelector("input").addEventListener("change", updatePassMeter);
       container.appendChild(label);
     }
   }
 
   document.getElementById("settings-msg").textContent = "";
   overlay.removeAttribute("hidden");
+  updatePassMeter();
 }
 window.openSettings = openSettings;
 
@@ -304,6 +307,96 @@ function closeSettings() {
   document.getElementById("overlay-settings").setAttribute("hidden", "");
 }
 window.closeSettings = closeSettings;
+
+function setStopMode(mode) {
+  document.getElementById("stop-fields-trail").style.display = mode === "trail" ? "" : "none";
+  document.getElementById("stop-fields-fixed").style.display = mode === "fixed" ? "" : "none";
+  document.querySelectorAll(".smp-btn").forEach(b => {
+    b.classList.toggle("active", b.dataset.mode === mode);
+  });
+  updatePassMeter();
+}
+window.setStopMode = setStopMode;
+
+// ── Pass rate estimator ────────────────────────────────────────────────────────
+// Baseline 88.8% from V4 3-year ES backtest with recommended settings.
+// Each deviation from the recommended config is penalised based on observed
+// backtest sensitivity. Score is clamped to [38, 95].
+const REC = { contracts: 2, stop: 10, maxStop: 20, tp: 40, trail: 8,
+              trendUp: 10, trendDn: 6, lossLimit: 1400, profitCap: 2000 };
+
+function updatePassMeter() {
+  let score = 88.8;
+
+  const contracts  = numVal("cfg-contracts")  || REC.contracts;
+  const stop       = numVal("cfg-stop")       || REC.stop;
+  const maxStop    = numVal("cfg-max-stop")   || REC.maxStop;
+  const tp         = numVal("cfg-tp")         || REC.tp;
+  const trail      = numVal("cfg-trail")      || REC.trail;
+  const stopMode   = document.querySelector(".smp-btn.active")?.dataset.mode ?? "trail";
+  const trendOn    = document.getElementById("cfg-trend-enabled")?.checked ?? true;
+  const trendUp    = numVal("cfg-trend-up")   || REC.trendUp;
+  const trendDn    = numVal("cfg-trend-dn")   || REC.trendDn;
+  const lossLimit  = numVal("cfg-daily-loss") || REC.lossLimit;
+  const profitCap  = numVal("cfg-profit-cap") || REC.profitCap;
+
+  // Fixed stop: slightly lower pass rate than trail (trail exits faster on losers)
+  if (stopMode === "fixed") score -= 3.5;
+
+  // Contracts: every extra contract above 2 raises drawdown risk
+  if (contracts > 2) score -= (contracts - 2) * 5.5;
+  if (contracts > 4) score -= (contracts - 4) * 4;   // steeper above 4
+
+  // Stop loss: too tight = whipsawed out; too loose = bigger losers
+  if (stop < 8)  score -= (8  - stop) * 3.5;
+  if (stop > 12) score -= (stop - 12) * 2.0;
+
+  // Max stop: should be ~2x stop
+  if (maxStop < stop * 1.5) score -= 4;
+  if (maxStop > 30)         score -= (maxStop - 30) * 0.8;
+
+  // Take profit: too tight = cuts winners; too wide = rarely reached
+  if (tp < 30) score -= (30 - tp) * 2.2;
+  if (tp > 55) score -= (tp - 55) * 1.0;
+
+  // Trail: too tight = stopped out too early
+  if (trail < 6) score -= (6 - trail) * 2.5;
+  if (trail > 12) score -= (trail - 12) * 1.0;
+
+  // Trend filter: biggest single edge — disabling it loses ~8–10%
+  if (!trendOn) score -= 9.5;
+  else {
+    if (trendUp > 14) score -= (trendUp - 14) * 1.0;
+    if (trendUp < 7)  score -= (7 - trendUp)  * 1.5;
+    if (trendDn > 9)  score -= (trendDn - 9)  * 1.5;
+    if (trendDn < 4)  score -= (4 - trendDn)  * 1.0;
+  }
+
+  // Strategies disabled (each active one contributes ~3%)
+  let activeStrats = 0;
+  document.querySelectorAll("#settings-strategies input[data-strat]").forEach(el => {
+    if (el.checked) activeStrats++;
+  });
+  const totalStrats = document.querySelectorAll("#settings-strategies input[data-strat]").length || 6;
+  score -= (totalStrats - activeStrats) * 3.2;
+
+  // Risk limits: too wide = prop firm disqualification risk
+  if (lossLimit > 1450) score -= (lossLimit - 1450) / 100 * 3;
+  if (profitCap < 1500) score -= 3;
+
+  score = Math.max(38, Math.min(95, score));
+
+  const pctEl  = document.getElementById("pass-pct");
+  const barEl  = document.getElementById("pass-bar");
+  if (!pctEl || !barEl) return;
+
+  const tier = score >= 80 ? "good" : score >= 65 ? "warn" : "bad";
+  pctEl.textContent = score.toFixed(1) + "%";
+  pctEl.className = "pass-meter-pct" + (tier === "good" ? "" : ` ${tier}`);
+  barEl.style.width = score + "%";
+  barEl.className = "pass-meter-bar-fill" + (tier === "good" ? "" : ` ${tier}`);
+}
+window.updatePassMeter = updatePassMeter;
 
 async function saveSettings() {
   if (!window.bot) return;
@@ -316,8 +409,10 @@ async function saveSettings() {
   msg.style.color = "var(--green-lo)";
 
   // Read form values
+  const activeMode = document.querySelector(".smp-btn.active")?.dataset.mode ?? "trail";
   const trading = {
     ...(state.fullConfig?.trading ?? {}),
+    stopMode:        activeMode,
     dailyLossLimit:  numVal("cfg-daily-loss"),
     dailyProfitCap:  numVal("cfg-profit-cap"),
     contracts:       numVal("cfg-contracts"),
@@ -471,16 +566,141 @@ if (window.bot) {
   });
 }
 
-/* ── Startup glitch animation ─────────────────────────────────────────────── */
-(async function startup() {
-  await new Promise(r => setTimeout(r, 300));
+/* ── Intro sequence ───────────────────────────────────────────────────────── */
+const INTRO_SEEN_KEY = 'matrixBotIntroSeen';
+let _pillTimers = [];
+let _introResolve = null;
 
+function _iSleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function _iType(text, speed = 65) {
+  const el = document.getElementById('intro-text');
+  for (const ch of text) { el.textContent += ch; await _iSleep(speed); }
+}
+
+async function _iErase(speed = 40) {
+  const el = document.getElementById('intro-text');
+  while (el.textContent.length > 0) {
+    el.textContent = el.textContent.slice(0, -1);
+    await _iSleep(speed);
+  }
+}
+
+function _startPillCanvas(cvId, fgColor, bgHex) {
+  const cv = document.getElementById(cvId);
+  if (!cv) return;
+  const ctx = cv.getContext('2d');
+  const W = cv.width, H = cv.height;
+  const CHARS = 'ｦｧｨｩｺｻｼｽｾﾀﾁ01アイｳｴﾂﾃ10ｵｶｷ'.split('');
+  const fs = 6, cols = Math.ceil(W / fs);
+  const drops = Array.from({ length: cols }, () => Math.random() * -(H / fs) * 2);
+  ctx.fillStyle = bgHex;
+  ctx.fillRect(0, 0, W, H);
+  const tid = setInterval(() => {
+    ctx.globalAlpha = 0.13;
+    ctx.fillStyle = bgHex;
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = fgColor;
+    ctx.font = `${fs}px monospace`;
+    for (let i = 0; i < drops.length; i++) {
+      ctx.fillText(CHARS[Math.floor(Math.random() * CHARS.length)], i * fs, drops[i] * fs);
+      if (++drops[i] * fs > H) drops[i] = Math.random() * -(H / fs);
+    }
+  }, 50);
+  _pillTimers.push(tid);
+}
+
+async function pickPill(color) {
+  const pills = document.getElementById('intro-pills');
+  pills.style.pointerEvents = 'none';
+  _pillTimers.forEach(clearInterval);
+  _pillTimers = [];
+  pills.style.transition = 'opacity 0.35s';
+  pills.style.opacity = '0';
+  document.getElementById('intro-sub').style.opacity = '0';
+  await _iSleep(380);
+  await _iErase(32);
+
+  if (color === 'red') {
+    await _iType('GOOD CHOICE.', 74);
+    await _iSleep(480);
+    await _iErase(36);
+    await _iType('WELCOME TO THE REAL.', 60);
+    await _iSleep(1400);
+    localStorage.setItem(INTRO_SEEN_KEY, '1');
+    const ov = document.getElementById('overlay-intro');
+    ov.style.opacity = '0';
+    await _iSleep(920);
+    ov.style.display = 'none';
+    _introResolve?.();
+  } else {
+    await _iType('THE MATRIX HAS YOU.', 66);
+    await _iSleep(620);
+    await _iErase(36);
+    await _iType('GOODBYE.', 78);
+    await _iSleep(1300);
+    window.bot?.close();
+    await _iSleep(8000);
+  }
+}
+window.pickPill = pickPill;
+
+async function runIntro() {
+  const ov = document.getElementById('overlay-intro');
+  ov.style.opacity = '1';
+  ov.style.display = 'flex';
+  await _iSleep(600);
+
+  await _iType('HELLO.', 82);
+  await _iSleep(780);
+  await _iErase(46);
+  await _iSleep(340);
+
+  await _iType('WAKE UP.', 74);
+  await _iSleep(720);
+  await _iErase(44);
+  await _iSleep(320);
+
+  await _iType('ARE YOU IN THE RIGHT PLACE?', 56);
+  await _iSleep(280);
+
+  const sub = document.getElementById('intro-sub');
+  sub.textContent = 'ONE PILL CHANGES EVERYTHING.';
+  await _iSleep(30);
+  sub.style.opacity = '1';
+  await _iSleep(680);
+
+  const pills = document.getElementById('intro-pills');
+  await _iSleep(30);
+  pills.style.opacity = '1';
+  pills.style.pointerEvents = 'auto';
+
+  _startPillCanvas('cv-blue', '#4488ff', '#00001a');
+  _startPillCanvas('cv-red',  '#ff3322', '#1a0000');
+
+  // Block until red pill is picked (blue pill closes the window)
+  return new Promise(resolve => { _introResolve = resolve; });
+}
+
+/* ── Startup glitch ───────────────────────────────────────────────────────── */
+async function _startupGlitch() {
+  await _iSleep(300);
   const titleEl = document.querySelector(".title-name");
   if (titleEl) await glitchReveal(titleEl, "ES FUTURES BOT", { speed: 3, frameMs: 35 });
-
   const verEl = document.getElementById("app-version");
   if (verEl) {
-    await new Promise(r => setTimeout(r, 200));
+    await _iSleep(200);
     await glitchReveal(verEl, verEl.textContent, { speed: 2, frameMs: 50 });
+  }
+}
+
+(async function main() {
+  if (!localStorage.getItem(INTRO_SEEN_KEY)) {
+    await runIntro();
+    // runIntro resolves when overlay is hidden (red pill path) or never (blue pill)
+    await _startupGlitch();
+  } else {
+    await _startupGlitch();
   }
 })();

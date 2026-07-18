@@ -7,20 +7,86 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
+<script>if (window.bot?.platform === "darwin") document.body.classList.add("is-mac");</script>
 
 <!-- Matrix rain canvas (background layer) -->
 <canvas id="rain"></canvas>
 
+<!-- ── One-time intro overlay ─────────────────────────────────────────────── -->
+<div id="overlay-intro" style="display:none">
+  <div id="intro-stage">
+    <div id="intro-type-area">
+      <span id="intro-text"></span><span class="intro-cursor">█</span>
+    </div>
+    <div id="intro-sub"></div>
+    <div id="intro-pills">
+      <!-- Blue pill — left hand -->
+      <div class="pill-option">
+        <div class="pill-hold" onclick="pickPill('blue')">
+          <div class="pill-cap pill-blue">
+            <canvas id="cv-blue" width="72" height="28"></canvas>
+            <div class="pill-sheen"></div>
+          </div>
+          <svg class="hand-svg" viewBox="0 0 78 142" width="78" height="142" xmlns="http://www.w3.org/2000/svg">
+            <g fill="rgba(0,8,0,0.92)" stroke="#008822" stroke-width="1.5" stroke-linejoin="round">
+              <rect x="5"  y="80" width="66" height="42" rx="7"/>
+              <rect x="13" y="116" width="50" height="26" rx="5"/>
+              <rect x="8"  y="22" width="13" height="62" rx="6"/>
+              <rect x="24" y="12" width="13" height="72" rx="6"/>
+              <rect x="39" y="18" width="13" height="66" rx="6"/>
+              <rect x="54" y="30" width="11" height="54" rx="5"/>
+            </g>
+            <g fill="rgba(0,8,0,0.92)" stroke="#008822" stroke-width="1.5">
+              <rect x="-4" y="78" width="12" height="34" rx="6" transform="rotate(-30 4 95)"/>
+            </g>
+          </svg>
+        </div>
+        <div class="pill-label-wrap">
+          <div class="pill-name pill-name-blue">BLUE PILL</div>
+          <div class="pill-desc">Stay where you are.</div>
+        </div>
+      </div>
+      <!-- Red pill — right hand (SVG mirrored) -->
+      <div class="pill-option">
+        <div class="pill-hold" onclick="pickPill('red')">
+          <div class="pill-cap pill-red">
+            <canvas id="cv-red" width="72" height="28"></canvas>
+            <div class="pill-sheen"></div>
+          </div>
+          <svg class="hand-svg hand-mirror" viewBox="0 0 78 142" width="78" height="142" xmlns="http://www.w3.org/2000/svg">
+            <g fill="rgba(0,8,0,0.92)" stroke="#008822" stroke-width="1.5" stroke-linejoin="round">
+              <rect x="5"  y="80" width="66" height="42" rx="7"/>
+              <rect x="13" y="116" width="50" height="26" rx="5"/>
+              <rect x="8"  y="22" width="13" height="62" rx="6"/>
+              <rect x="24" y="12" width="13" height="72" rx="6"/>
+              <rect x="39" y="18" width="13" height="66" rx="6"/>
+              <rect x="54" y="30" width="11" height="54" rx="5"/>
+            </g>
+            <g fill="rgba(0,8,0,0.92)" stroke="#008822" stroke-width="1.5">
+              <rect x="-4" y="78" width="12" height="34" rx="6" transform="rotate(-30 4 95)"/>
+            </g>
+          </svg>
+        </div>
+        <div class="pill-label-wrap">
+          <div class="pill-name pill-name-red">RED PILL</div>
+          <div class="pill-desc">Find out how deep it goes.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Custom title bar / drag region -->
 <div id="titlebar">
   <div id="titlebar-left">
+    <div class="tl-spacer"></div>
     <span class="title-logo">⬡</span>
     <span class="title-name">ES FUTURES BOT</span>
     <span class="title-ver" id="app-version">v1.0.0</span>
   </div>
   <div id="titlebar-right">
     <span id="conn-dot" class="dot dot-off" title="Connection"></span>
-    <button class="wbtn wbtn-settings" id="btn-settings" title="Settings" onclick="openSettings()">⚙</button>
+    <button class="wbtn wbtn-settings" id="btn-settings" title="Settings" onclick="openSettings()">⚙ SETTINGS</button>
     <button class="wbtn wbtn-pause" id="btn-pause" title="Pause all engines" onclick="togglePause()">⏸</button>
     <button class="wbtn" id="btn-minimize" onclick="window.bot?.minimize()">─</button>
     <button class="wbtn wbtn-close" id="btn-close" onclick="window.bot?.close()">✕</button>
@@ -44,39 +110,76 @@
       <button class="wbtn wbtn-close" onclick="closeSettings()" style="-webkit-app-region:no-drag">✕</button>
     </div>
 
+    <!-- Pass rate meter -->
+    <div class="pass-meter-wrap">
+      <div class="pass-meter-row">
+        <span class="pass-meter-label">EST. COMBINE PASS RATE</span>
+        <span class="pass-meter-pct" id="pass-pct">—</span>
+      </div>
+      <div class="pass-meter-bar-bg">
+        <div class="pass-meter-bar-fill" id="pass-bar"></div>
+      </div>
+      <div class="pass-meter-note">Based on 3-year ES backtest · Recommended settings = 88.8%</div>
+    </div>
+
     <div class="settings-body">
       <!-- Left column -->
       <div class="settings-col">
         <div class="settings-section-label">RISK</div>
         <label class="field-row">
           <span class="field-k">Daily Loss Limit</span>
-          <span class="field-unit">$<input class="field-v" type="number" id="cfg-daily-loss" min="100" max="5000"></span>
+          <span class="field-unit">$<input class="field-v" type="number" id="cfg-daily-loss" min="100" max="5000" oninput="updatePassMeter()"></span>
+          <span class="field-rec">REC $1,400</span>
         </label>
         <label class="field-row">
           <span class="field-k">Daily Profit Cap</span>
-          <span class="field-unit">$<input class="field-v" type="number" id="cfg-profit-cap" min="100" max="5000"></span>
+          <span class="field-unit">$<input class="field-v" type="number" id="cfg-profit-cap" min="100" max="5000" oninput="updatePassMeter()"></span>
+          <span class="field-rec">REC $2,000</span>
         </label>
         <label class="field-row">
           <span class="field-k">Max Contracts</span>
-          <input class="field-v field-v-sm" type="number" id="cfg-contracts" min="1" max="10">
+          <input class="field-v field-v-sm" type="number" id="cfg-contracts" min="1" max="10" oninput="updatePassMeter()">
+          <span class="field-rec">REC 2</span>
         </label>
 
         <div class="settings-section-label" style="margin-top:18px">ORDERS</div>
-        <label class="field-row">
-          <span class="field-k">Stop Loss Ticks</span>
-          <input class="field-v field-v-sm" type="number" id="cfg-stop" min="5" max="20">
-        </label>
-        <label class="field-row">
-          <span class="field-k">Max Stop Ticks</span>
-          <input class="field-v field-v-sm" type="number" id="cfg-max-stop" min="10" max="60">
-        </label>
+
+        <!-- Stop mode toggle -->
+        <div class="field-row" style="margin-bottom:12px">
+          <span class="field-k">Stop Mode</span>
+          <div class="stop-mode-pill" id="stop-mode-pill">
+            <button class="smp-btn active" data-mode="trail" onclick="setStopMode('trail')">TRAIL</button>
+            <button class="smp-btn" data-mode="fixed" onclick="setStopMode('fixed')">FIXED</button>
+          </div>
+        </div>
+
+        <!-- Trail stop fields (shown when mode = trail) -->
+        <div id="stop-fields-trail">
+          <label class="field-row">
+            <span class="field-k">Trail Distance</span>
+            <input class="field-v field-v-sm" type="number" id="cfg-trail" min="4" max="20" oninput="updatePassMeter()">
+            <span class="field-rec">REC 8</span>
+          </label>
+        </div>
+
+        <!-- Fixed stop fields (shown when mode = fixed) -->
+        <div id="stop-fields-fixed" style="display:none">
+          <label class="field-row">
+            <span class="field-k">Stop Loss Ticks</span>
+            <input class="field-v field-v-sm" type="number" id="cfg-stop" min="5" max="20" oninput="updatePassMeter()">
+            <span class="field-rec">REC 10</span>
+          </label>
+          <label class="field-row">
+            <span class="field-k">Max Stop Ticks</span>
+            <input class="field-v field-v-sm" type="number" id="cfg-max-stop" min="10" max="60" oninput="updatePassMeter()">
+            <span class="field-rec">REC 20</span>
+          </label>
+        </div>
+
         <label class="field-row">
           <span class="field-k">Take Profit Ticks</span>
-          <input class="field-v field-v-sm" type="number" id="cfg-tp" min="20" max="100">
-        </label>
-        <label class="field-row">
-          <span class="field-k">Trail Ticks</span>
-          <input class="field-v field-v-sm" type="number" id="cfg-trail" min="4" max="20">
+          <input class="field-v field-v-sm" type="number" id="cfg-tp" min="20" max="100" oninput="updatePassMeter()">
+          <span class="field-rec">REC 40</span>
         </label>
       </div>
 
@@ -90,15 +193,18 @@
         <div class="settings-section-label" style="margin-top:18px">TREND FILTER</div>
         <label class="field-row">
           <span class="field-k">Enabled</span>
-          <input class="field-toggle" type="checkbox" id="cfg-trend-enabled">
+          <input class="field-toggle" type="checkbox" id="cfg-trend-enabled" onchange="updatePassMeter()">
+          <span class="field-rec">REC ON</span>
         </label>
         <label class="field-row">
           <span class="field-k">Uptrend Pts</span>
-          <input class="field-v field-v-sm" type="number" id="cfg-trend-up" min="3" max="30">
+          <input class="field-v field-v-sm" type="number" id="cfg-trend-up" min="3" max="30" oninput="updatePassMeter()">
+          <span class="field-rec">REC 10</span>
         </label>
         <label class="field-row">
           <span class="field-k">Downtrend Pts</span>
-          <input class="field-v field-v-sm" type="number" id="cfg-trend-dn" min="3" max="30">
+          <input class="field-v field-v-sm" type="number" id="cfg-trend-dn" min="3" max="30" oninput="updatePassMeter()">
+          <span class="field-rec">REC 6</span>
         </label>
       </div>
     </div>
