@@ -20,31 +20,12 @@
     </div>
     <div id="intro-sub"></div>
     <div id="intro-pills">
-      <!-- Blue pill — left hand -->
+      <!-- Blue pill -->
       <div class="pill-option">
         <div class="pill-hold" onclick="pickPill('blue')">
-          <div class="hand-wrap">
-            <svg class="hand-svg" viewBox="0 0 132 155" width="132" height="155" xmlns="http://www.w3.org/2000/svg">
-              <g fill="rgba(0,8,0,0.92)" stroke="#008822" stroke-width="1.5" stroke-linejoin="round">
-                <!-- Wide palm — the dominant shape -->
-                <rect x="14" y="68" width="108" height="56" rx="14"/>
-                <!-- Wrist -->
-                <rect x="38" y="116" width="64" height="38" rx="11"/>
-                <!-- Four fingers — short and proportional -->
-                <rect x="28"  y="22" width="20" height="52" rx="10"/>
-                <rect x="52"  y="10" width="20" height="65" rx="10"/>
-                <rect x="76"  y="16" width="20" height="59" rx="10"/>
-                <rect x="99"  y="28" width="17" height="48" rx="9"/>
-              </g>
-              <!-- Thumb — prominent rounded oval on the left side -->
-              <ellipse cx="10" cy="90" rx="14" ry="26"
-                transform="rotate(-18 10 90)"
-                fill="rgba(0,8,0,0.92)" stroke="#008822" stroke-width="1.5"/>
-            </svg>
-            <div class="pill-cap pill-blue on-palm">
-              <canvas id="cv-blue" width="72" height="28"></canvas>
-              <div class="pill-sheen"></div>
-            </div>
+          <div class="pill-cap pill-blue">
+            <canvas id="cv-blue" width="110" height="42"></canvas>
+            <div class="pill-sheen"></div>
           </div>
         </div>
         <div class="pill-label-wrap">
@@ -52,27 +33,12 @@
           <div class="pill-desc">Stay where you are.</div>
         </div>
       </div>
-      <!-- Red pill — right hand (mirrored) -->
+      <!-- Red pill -->
       <div class="pill-option">
         <div class="pill-hold" onclick="pickPill('red')">
-          <div class="hand-wrap">
-            <svg class="hand-svg hand-mirror" viewBox="0 0 132 155" width="132" height="155" xmlns="http://www.w3.org/2000/svg">
-              <g fill="rgba(0,8,0,0.92)" stroke="#008822" stroke-width="1.5" stroke-linejoin="round">
-                <rect x="14" y="68" width="108" height="56" rx="14"/>
-                <rect x="38" y="116" width="64" height="38" rx="11"/>
-                <rect x="28"  y="22" width="20" height="52" rx="10"/>
-                <rect x="52"  y="10" width="20" height="65" rx="10"/>
-                <rect x="76"  y="16" width="20" height="59" rx="10"/>
-                <rect x="99"  y="28" width="17" height="48" rx="9"/>
-              </g>
-              <ellipse cx="10" cy="90" rx="14" ry="26"
-                transform="rotate(-18 10 90)"
-                fill="rgba(0,8,0,0.92)" stroke="#008822" stroke-width="1.5"/>
-            </svg>
-            <div class="pill-cap pill-red on-palm">
-              <canvas id="cv-red" width="72" height="28"></canvas>
-              <div class="pill-sheen"></div>
-            </div>
+          <div class="pill-cap pill-red">
+            <canvas id="cv-red" width="110" height="42"></canvas>
+            <div class="pill-sheen"></div>
           </div>
         </div>
         <div class="pill-label-wrap">
