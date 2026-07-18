@@ -759,11 +759,11 @@ body.is-mac #btn-minimize         { display: none; }
   flex-shrink: 0;
 }
 
-/* Pill resting on the palm — palm center is at y=115 of 172 SVG height = 66.9% */
+/* Pill resting on the palm — palm center is at y=96 of 155 SVG height = 61.9% */
 .pill-cap.on-palm {
   position: absolute;
   left: 50%;
-  top: 67%;
+  top: 62%;
   transform: translate(-50%, -50%);
 }
 

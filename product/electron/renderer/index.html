@@ -20,28 +20,27 @@
     </div>
     <div id="intro-sub"></div>
     <div id="intro-pills">
-      <!-- Blue pill — left hand (palm up, offering toward viewer) -->
+      <!-- Blue pill — left hand -->
       <div class="pill-option">
         <div class="pill-hold" onclick="pickPill('blue')">
           <div class="hand-wrap">
-            <svg class="hand-svg" viewBox="0 0 114 172" width="114" height="172" xmlns="http://www.w3.org/2000/svg">
+            <svg class="hand-svg" viewBox="0 0 132 155" width="132" height="155" xmlns="http://www.w3.org/2000/svg">
               <g fill="rgba(0,8,0,0.92)" stroke="#008822" stroke-width="1.5" stroke-linejoin="round">
-                <!-- Wide dominant palm — the main feature -->
-                <rect x="4"  y="88"  width="92" height="54" rx="11"/>
-                <!-- Wrist, narrowing below -->
-                <rect x="26" y="134" width="50" height="36" rx="9"/>
-                <!-- Fingers — shorter, fanned, palm-up perspective -->
-                <rect x="8"  y="42" width="16" height="52" rx="8"/>
-                <rect x="29" y="30" width="17" height="64" rx="8"/>
-                <rect x="50" y="28" width="17" height="66" rx="8"/>
-                <rect x="71" y="36" width="15" height="58" rx="7"/>
+                <!-- Wide palm — the dominant shape -->
+                <rect x="14" y="68" width="108" height="56" rx="14"/>
+                <!-- Wrist -->
+                <rect x="38" y="116" width="64" height="38" rx="11"/>
+                <!-- Four fingers — short and proportional -->
+                <rect x="28"  y="22" width="20" height="52" rx="10"/>
+                <rect x="52"  y="10" width="20" height="65" rx="10"/>
+                <rect x="76"  y="16" width="20" height="59" rx="10"/>
+                <rect x="99"  y="28" width="17" height="48" rx="9"/>
               </g>
-              <!-- Thumb — prominent on left side, angled outward -->
-              <g fill="rgba(0,8,0,0.92)" stroke="#008822" stroke-width="1.5">
-                <rect x="-6" y="88" width="16" height="40" rx="8" transform="rotate(-38 5 108)"/>
-              </g>
+              <!-- Thumb — prominent rounded oval on the left side -->
+              <ellipse cx="10" cy="90" rx="14" ry="26"
+                transform="rotate(-18 10 90)"
+                fill="rgba(0,8,0,0.92)" stroke="#008822" stroke-width="1.5"/>
             </svg>
-            <!-- Pill resting on the palm -->
             <div class="pill-cap pill-blue on-palm">
               <canvas id="cv-blue" width="72" height="28"></canvas>
               <div class="pill-sheen"></div>
@@ -57,18 +56,18 @@
       <div class="pill-option">
         <div class="pill-hold" onclick="pickPill('red')">
           <div class="hand-wrap">
-            <svg class="hand-svg hand-mirror" viewBox="0 0 114 172" width="114" height="172" xmlns="http://www.w3.org/2000/svg">
+            <svg class="hand-svg hand-mirror" viewBox="0 0 132 155" width="132" height="155" xmlns="http://www.w3.org/2000/svg">
               <g fill="rgba(0,8,0,0.92)" stroke="#008822" stroke-width="1.5" stroke-linejoin="round">
-                <rect x="4"  y="88"  width="92" height="54" rx="11"/>
-                <rect x="26" y="134" width="50" height="36" rx="9"/>
-                <rect x="8"  y="42" width="16" height="52" rx="8"/>
-                <rect x="29" y="30" width="17" height="64" rx="8"/>
-                <rect x="50" y="28" width="17" height="66" rx="8"/>
-                <rect x="71" y="36" width="15" height="58" rx="7"/>
+                <rect x="14" y="68" width="108" height="56" rx="14"/>
+                <rect x="38" y="116" width="64" height="38" rx="11"/>
+                <rect x="28"  y="22" width="20" height="52" rx="10"/>
+                <rect x="52"  y="10" width="20" height="65" rx="10"/>
+                <rect x="76"  y="16" width="20" height="59" rx="10"/>
+                <rect x="99"  y="28" width="17" height="48" rx="9"/>
               </g>
-              <g fill="rgba(0,8,0,0.92)" stroke="#008822" stroke-width="1.5">
-                <rect x="-6" y="88" width="16" height="40" rx="8" transform="rotate(-38 5 108)"/>
-              </g>
+              <ellipse cx="10" cy="90" rx="14" ry="26"
+                transform="rotate(-18 10 90)"
+                fill="rgba(0,8,0,0.92)" stroke="#008822" stroke-width="1.5"/>
             </svg>
             <div class="pill-cap pill-red on-palm">
               <canvas id="cv-red" width="72" height="28"></canvas>
