@@ -1,22 +1,30 @@
 {
   "name": "es-futures-bot",
-  "version": "1.0.0",
+  "version": "1.1.48",
   "description": "ES Futures algorithmic trading bot for TopstepX combines",
+  "type": "module",
   "main": "electron/main.js",
   "scripts": {
-    "start":     "electron .",
-    "dev":       "DEV_LICENSE=1 electron .",
+    "start": "electron .",
+    "dev": "DEV_LICENSE=1 electron .",
     "build:mac": "electron-builder --mac",
     "build:win": "electron-builder --win",
-    "build:all": "electron-builder --mac --win"
+    "build:all": "electron-builder --mac --win",
+    "bundle": "node_modules/.bin/esbuild ../engine/topstepx-engine.js --bundle --platform=node --format=esm --banner:js=\"import { createRequire } from 'module'; const require = createRequire(import.meta.url);\" --outfile=dist-engine/topstepx-engine.js && node scripts/patch-bundle.mjs && node_modules/.bin/esbuild ../engine/alpaca-engine.js --bundle --platform=node --format=esm --banner:js=\"import { createRequire } from 'module'; const require = createRequire(import.meta.url);\" --outfile=dist-engine/alpaca-engine.js",
+    "release:mac": "npm run bundle && electron-builder --mac --publish=always",
+    "release:win": "npm run bundle && electron-builder --win --publish=always",
+    "release:all": "npm run bundle && electron-builder --mac --win --publish=always"
   },
   "dependencies": {
     "@microsoft/signalr": "^8.0.0",
-    "axios": "^1.7.0"
+    "axios": "^1.7.0",
+    "electron-updater": "^6.8.9",
+    "ws": "^8.21.0"
   },
   "devDependencies": {
     "electron": "^31.0.0",
-    "electron-builder": "^24.13.0"
+    "electron-builder": "^24.13.0",
+    "esbuild": "^0.28.1"
   },
   "build": {
     "appId": "com.esfuturesbot.app",
@@ -25,24 +33,63 @@
       "electron/**/*",
       "src/**/*",
       "config.default.json",
-      "README.txt",
-      "!**/node_modules/**"
+      "README.txt"
     ],
-    "extraFiles": [
-      { "from": "../engine", "to": "engine", "filter": ["topstepx-engine.js","strategies.js","indicators.js"] }
+    "extraResources": [
+      {
+        "from": "dist-engine",
+        "to": "engine",
+        "filter": [
+          "topstepx-engine.js",
+          "alpaca-engine.js"
+        ]
+      },
+      {
+        "from": "../engine/package.json",
+        "to": "engine/package.json"
+      },
+      {
+        "from": "../node_modules/ws",
+        "to": "engine/node_modules/ws"
+      }
     ],
+    "publish": {
+      "provider": "github",
+      "owner": "NigelAi1140",
+      "repo": "es-futures-bot",
+      "releaseType": "draft"
+    },
     "mac": {
       "category": "public.app-category.finance",
       "icon": "assets/icon.icns",
-      "target": [{ "target": "dmg", "arch": ["arm64","x64"] }]
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ]
     },
     "win": {
       "icon": "assets/icon.ico",
-      "target": [{ "target": "nsis", "arch": ["x64"] }]
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
     },
     "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "oneClick": true,
+      "allowToChangeInstallationDirectory": false,
+      "installerLanguages": [
+        "en_US"
+      ],
+      "deleteAppDataOnUninstall": false
     }
   }
 }
