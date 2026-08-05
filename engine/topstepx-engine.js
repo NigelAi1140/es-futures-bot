@@ -612,7 +612,7 @@ async function resolveContract() {
 }
 
 // ─── Historical bars ──────────────────────────────────────────────────────────
-async function fetchBars(limit = 300) {
+async function fetchBars(limit = 300, partial = false) {
   const now   = new Date();
   const start = new Date(now - 48 * 60 * 60 * 1000); // 48h back for overnight range
 
@@ -624,7 +624,7 @@ async function fetchBars(limit = 300) {
     unit:             2,     // Minute
     unitNumber:       5,     // 5-min bars
     limit,
-    includePartialBar: false,
+    includePartialBar: partial,
   });
 
   if (!data.success) {
@@ -2401,18 +2401,37 @@ async function weeklyRecap() {
 }
 
 // ─── Minute tick loop ─────────────────────────────────────────────────────────
-let lastBar5Min  = -1;
+let lastBar5Min  = -1;   // tracks the 5-min bucket last evaluated (multiples of 5)
 let lastBar15Min = -1;
 
 async function tick() {
   const now = new Date();
   const hm  = now.getUTCHours() * 100 + now.getUTCMinutes();
   const min = now.getUTCMinutes();
+  const sec = now.getUTCSeconds();
 
-  // ── 5m boundary: refresh bars, reconcile positions, evaluate 5m signals ──
-  if (min % 5 === 0 && min !== lastBar5Min) {
-    lastBar5Min = min;
-    await fetchBars(300).catch(console.error);
+  // ── 5m evaluation — pre-close (primary) + post-close (fallback) ───────────
+  // Bucket maps both the 4th-minute pre-close AND the 0th-minute post-close of
+  // the same 5-min bar to one key — preventing double-evaluation of the same bar.
+  // Formula: Math.floor((min+1)/5)*5 % 60 → e.g. min=49→50, min=50→50, min=59→0, min=0→0
+  const bar5Bucket = (Math.floor((min + 1) / 5) * 5) % 60;
+
+  // Pre-close: last 10 seconds of the 4th minute (e.g. 13:49:50–13:49:59).
+  // includePartialBar=true returns the nearly-complete bar so signals fire ~10s
+  // before the bar officially closes — entries land at a tighter price.
+  if (min % 5 === 4 && sec >= 50 && bar5Bucket !== lastBar5Min) {
+    lastBar5Min = bar5Bucket;
+    await fetchBars(300, true).catch(console.error);   // near-final bar
+    await reconcilePositions().catch(console.error);
+    runEvaluate();
+  }
+
+  // Post-close fallback: first 10 seconds after bar close (e.g. 13:50:00–13:50:09).
+  // includePartialBar=false — only fires if the pre-close tick was missed or the
+  // API hadn't published the bar yet. Direction gate prevents any double-trade.
+  if (min % 5 === 0 && sec <= 10 && bar5Bucket !== lastBar5Min) {
+    lastBar5Min = bar5Bucket;
+    await fetchBars(300, false).catch(console.error);  // confirmed closed bar
     await reconcilePositions().catch(console.error);
     runEvaluate();
   }
@@ -2422,7 +2441,7 @@ async function tick() {
   if (_reEvaluateAfterBoot) {
     _reEvaluateAfterBoot = false;
     console.log("[Boot] 🔁 Post-recovery re-evaluate — checking if signal still valid");
-    await fetchBars(300).catch(console.error);
+    await fetchBars(300, false).catch(console.error);
     runEvaluate();
     runEvaluate15();
   }
@@ -2436,8 +2455,8 @@ async function tick() {
   }
 
   // Pre-session brief: 13:25 UTC (5 min before AM open)
-  // getUTCSeconds() < 30 prevents double-fire — tick runs every 30s so hm===1325 hits twice
-  if (hm === 1325 && now.getUTCSeconds() < 30) {
+  // getUTCSeconds() < 10 prevents double-fire — tick runs every 10s
+  if (hm === 1325 && sec < 10) {
     if (isTodayWeekend()) {
       console.log("⛔ WEEKEND — no session today");
     } else if (isTodayHoliday()) {
@@ -2454,17 +2473,17 @@ async function tick() {
 
   // Weekly recap: Sunday 20:00 UTC (2:00 PM MDT / 1:00 PM MST)
   // Reads the trade log and summarises the past 7 days
-  if (hm === 2000 && now.getUTCSeconds() < 30 && now.getUTCDay() === 0) {
+  if (hm === 2000 && sec < 10 && now.getUTCDay() === 0) {
     await weeklyRecap().catch(console.error);
   }
 
   // Refresh news filter at 13:00 UTC (30 min before AM open)
-  if (hm === 1300 && now.getUTCSeconds() < 30) {
+  if (hm === 1300 && sec < 10) {
     await refreshNewsFilter().catch(console.error);
   }
 
   // Reset daily counters at session open 13:30 UTC
-  if (hm === 1330 && now.getUTCSeconds() < 30) {
+  if (hm === 1330 && sec < 10) {
     state.prevDayPnL        = state.dayPnL;  // snapshot before zeroing — drives next-day 1ct mode
     if (state.prevDayPnL <= -CFG.badDayThreshold) {
       console.log(`[Risk] ⚠️  Prior day P&L $${state.prevDayPnL.toFixed(0)} — next session capped at 1ct (bad-day protection)`);
@@ -2508,12 +2527,12 @@ async function tick() {
   }
 
   // Post-AM reconcile: 15:05 UTC (5 min after AM close)
-  if (hm === 1505 && now.getUTCSeconds() < 30 && !isTodayWeekend() && !isTodayHoliday()) {
+  if (hm === 1505 && sec < 10 && !isTodayWeekend() && !isTodayHoliday()) {
     await reconcileDayPnL("Post-AM").catch(console.error);
   }
 
   // Post-PM reconcile: 20:05 UTC — runs just before EOD summary
-  if (hm === 2005 && now.getUTCSeconds() < 30 && !isTodayWeekend() && !isTodayHoliday()) {
+  if (hm === 2005 && sec < 10 && !isTodayWeekend() && !isTodayHoliday()) {
     await reconcileDayPnL("Post-PM").catch(console.error);
     await endOfDaySummary().catch(console.error);
   }
@@ -2545,8 +2564,8 @@ async function main() {
     console.log(`[Gate] Boot upPct(10d): ${(upPct * 100).toFixed(0)}% up-days (${upCount}/${comparisons}) — overbought gate: ${state.upPctOverbought ? "🔴 ACTIVE" : "✅ off"}`);
   }
 
-  // Tick every 30 seconds
-  setInterval(() => tick().catch(console.error), 30_000);
+  // Tick every 10 seconds — needed to reliably hit the pre-close window (last 10s of each bar)
+  setInterval(() => tick().catch(console.error), 10_000);
   await tick();  // run immediately on boot
 
   console.log("[Boot] ✓ Engine running — waiting for session open");
