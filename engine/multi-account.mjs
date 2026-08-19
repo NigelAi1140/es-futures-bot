@@ -1,10 +1,11 @@
 #!/usr/bin/env node
-// Multi-account orchestrator — runs up to 5 independent TopstepX engine instances
+// Multi-account orchestrator — runs TopstepX and Alpaca engine instances.
 // Each account runs in its own child process with isolated state and credentials.
 // If one crashes it auto-restarts without affecting the others.
 //
 // Usage: node engine/multi-account.mjs
 // Config: accounts.json in project root (see accounts.example.json)
+// engine_type: "topstepx" (default) | "alpaca"
 
 import { spawn }          from 'child_process';
 import { readFileSync, existsSync } from 'fs';
@@ -13,10 +14,11 @@ import { fileURLToPath }  from 'url';
 import dotenv             from 'dotenv';
 import axios              from 'axios';
 
-const __dir      = dirname(fileURLToPath(import.meta.url));
-const ROOT       = resolve(__dir, '..');
-const ENGINE     = resolve(__dir, 'topstepx-engine.js');
-const CONFIG     = resolve(ROOT, 'accounts.json');
+const __dir         = dirname(fileURLToPath(import.meta.url));
+const ROOT          = resolve(__dir, '..');
+const ENGINE_TSX    = resolve(__dir, 'topstepx-engine.js');
+const ENGINE_ALPACA = resolve(__dir, 'alpaca-engine.js');
+const CONFIG        = resolve(ROOT, 'accounts.json');
 const BASE_ENV   = resolve(ROOT, '.env');
 
 // ── Load base .env (shared settings) ──────────────────────────────────────────
@@ -96,6 +98,19 @@ const accountLabels = Object.fromEntries(accounts.map(a => [a.name, makeLabel(a)
 // Label column width for alignment
 const LCOL = Math.max(...Object.values(accountLabels).map(l => l.length));
 const lpad = (s) => s.padEnd(LCOL);
+
+// When multiple engines share the same underlying ACCOUNT_ID (e.g. NQ + ES on the same
+// Topstep account), EOD/Weekly notifications would show duplicate rows with identical
+// balances. primaryReporters contains only the first engine per unique ACCOUNT_ID so
+// those bundles show 2 rows (one per real account) instead of 4.
+const _seenIds = new Set();
+const primaryReporters = new Set(
+  accounts.filter(a => {
+    if (!a.ACCOUNT_ID || _seenIds.has(a.ACCOUNT_ID)) return false;
+    _seenIds.add(a.ACCOUNT_ID);
+    return true;
+  }).map(a => a.name)
+);
 
 // ── Event aggregator ───────────────────────────────────────────────────────────
 // Each bundleable event type has a time window. When an event arrives, start the
@@ -181,30 +196,86 @@ function flushBundle(type) {
     }
 
     case 'PRESESSION_BRIEF': {
-      const evs   = [...eventMap.values()];
-      const first = evs[0];
+      const evs     = [...eventMap.values()];
+      const first   = evs[0];
       const hasFOMC = evs.some(e => e.isFOMC);
-      const news  = Math.max(...evs.map(e => e.newsBlocks ?? 0));
-      title = `📊 Pre-session — ${eventMap.size}/${accounts.length} accounts ready`;
-      const ctLines = accountNames.map(n => {
+      const news    = Math.max(...evs.map(e => e.newsBlocks ?? 0));
+      const tz      = evs.find(e => e.tz)?.tz ?? "MST";
+      const range   = evs.find(e => e.overnightRange != null)?.overnightRange;
+
+      // Trend — all accounts share the same filter
+      const trendStatus = evs.find(e => e.trendStatus)?.trendStatus ?? 'PENDING';
+      const trendLine =
+        trendStatus === 'UPTREND'   ? '📈 UPTREND — shorts suppressed' :
+        trendStatus === 'DOWNTREND' ? '📉 DOWNTREND — longs suppressed' :
+        trendStatus === 'NEUTRAL'   ? '↔️  NEUTRAL — all signals active' :
+                                      `⏳ PENDING — fires ~7:15 AM ${tz}`;
+
+      // Regime: all accounts share the same overnight range calc
+      const regimeLine = range != null
+        ? (range < 30 ? `🔴 TIGHT ${range}pts — 1ct cap` : range < 50 ? `🟡 NARROW ${range}pts — scaled` : `🟢 WIDE ${range}pts — full size`)
+        : 'Range: N/A';
+
+      title = `📊 Pre-session — ${eventMap.size}/${accounts.length} ready`;
+
+      // Per-account rows: contracts, balance, progress
+      const acctLines = accountNames.map(n => {
         const ev = eventMap.get(n);
-        return ev
-          ? `${lpad(accountLabels[n])} ${ev.contracts}ct${ev.simulated ? '' : ' ⭐'}`
-          : `${lpad(accountLabels[n])} —`;
+        if (!ev) return `⬜ ${lpad(accountLabels[n])} —`;
+
+        const ctStr  = `${ev.contracts}ct${ev.simulated ? '' : ' ⭐'}`;
+        const balStr = ev.balance != null ? ` $${Math.round(ev.balance).toLocaleString()}` : '';
+
+        let progressStr = '';
+        if (ev.simulated && ev.profitSoFar != null) {
+          const needed = Math.max(0, ev.combineTarget - ev.profitSoFar);
+          progressStr = needed <= 0
+            ? ' 🎯PASSED'
+            : ` +$${Math.round(ev.profitSoFar)} / $${Math.round(ev.combineTarget)}`;
+        } else if (!ev.simulated && ev.profitSoFar != null) {
+          progressStr = ` earned +$${Math.round(ev.profitSoFar)}`;
+        }
+
+        const ddStr = ev.ddBuffer != null ? ` DD:$${ev.ddBuffer}left` : '';
+
+        return `${lpad(accountLabels[n])} ${ctStr}${balStr}${progressStr}${ddStr}`;
       }).join('\n');
-      body = `${ctLines}\nNews: ${news}  |  FOMC: ${hasFOMC ? 'YES ⚠️' : 'No'}\nAM opens 7:45 MST`;
+
+      // Streak — use first funded account, or first account
+      const streakEv  = evs.find(e => !e.simulated) ?? evs[0];
+      const streakStr = streakEv
+        ? (streakEv.consecutiveWins  >= 2 ? `🔥 ${streakEv.consecutiveWins}W streak — pressing` :
+           streakEv.consecutiveWins  === 1 ? `↑ 1W — building` :
+           streakEv.consecutiveLosses >= 2 ? `⚠️ ${streakEv.consecutiveLosses}L streak — 1ct cap` :
+           streakEv.consecutiveLosses === 1 ? `↓ 1L — slight pullback` : 'Neutral')
+        : 'Neutral';
+
+      body = [
+        acctLines,
+        '─'.repeat(28),
+        `Regime: ${regimeLine}`,
+        `Trend:  ${trendLine}`,
+        `Streak: ${streakStr}`,
+        `News: ${news}  |  FOMC: ${hasFOMC ? 'YES ⚠️' : 'No'}`,
+        `AM 7:45 ${tz}  |  PM 12:30–2:00 ${tz}`,
+      ].join('\n');
       break;
     }
 
     case 'EOD_SUMMARY': {
-      const evs     = [...eventMap.values()];
-      const net     = evs.reduce((s, e) => s + e.pnl, 0);
+      // Only count each underlying account once — NQ engine is the primary reporter
+      // when NQ+ES share the same ACCOUNT_ID (e.g. 50K-Funded and 50K-Funded-ES3).
+      const primaryEvs = accountNames
+        .filter(n => primaryReporters.has(n))
+        .map(n => eventMap.get(n))
+        .filter(Boolean);
+      const net     = primaryEvs.reduce((s, e) => s + e.pnl, 0);
       const netStr  = net >= 0 ? `+$${Math.round(net)}` : `-$${Math.round(Math.abs(net))}`;
-      const totalW  = evs.reduce((s, e) => s + e.wins, 0);
-      const totalL  = evs.reduce((s, e) => s + e.losses, 0);
+      const totalW  = primaryEvs.reduce((s, e) => s + e.wins, 0);
+      const totalL  = primaryEvs.reduce((s, e) => s + e.losses, 0);
       const date    = new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/Phoenix' });
       title = `📊 EOD ${date} — net ${netStr}`;
-      const lines   = accountNames.map(n => {
+      const lines   = accountNames.filter(n => primaryReporters.has(n)).map(n => {
         const ev = eventMap.get(n);
         if (!ev) return `⬜ ${lpad(accountLabels[n])} —`;
         const pStr = ev.pnl >= 0 ? `+$${Math.round(ev.pnl)}` : `-$${Math.round(Math.abs(ev.pnl))}`;
@@ -215,14 +286,18 @@ function flushBundle(type) {
     }
 
     case 'WEEKLY_SUMMARY': {
-      const evs    = [...eventMap.values()];
-      const net    = evs.reduce((s, e) => s + e.pnl, 0);
+      // Same dedup as EOD_SUMMARY — one row per underlying account.
+      const primaryEvs = accountNames
+        .filter(n => primaryReporters.has(n))
+        .map(n => eventMap.get(n))
+        .filter(Boolean);
+      const net    = primaryEvs.reduce((s, e) => s + e.pnl, 0);
       const netStr = net >= 0 ? `+$${Math.round(net)}` : `-$${Math.round(Math.abs(net))}`;
-      const totalW = evs.reduce((s, e) => s + e.wins, 0);
-      const totalL = evs.reduce((s, e) => s + e.losses, 0);
+      const totalW = primaryEvs.reduce((s, e) => s + e.wins, 0);
+      const totalL = primaryEvs.reduce((s, e) => s + e.losses, 0);
       const wkEnd  = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/Phoenix' });
       title = `📅 Weekly recap — ending ${wkEnd}`;
-      const lines  = accountNames.map(n => {
+      const lines  = accountNames.filter(n => primaryReporters.has(n)).map(n => {
         const ev = eventMap.get(n);
         if (!ev) return `⬜ ${lpad(accountLabels[n])} —`;
         const pStr = ev.pnl >= 0 ? `+$${Math.round(ev.pnl)}` : `-$${Math.round(Math.abs(ev.pnl))}`;
@@ -249,11 +324,19 @@ const maxLen = Math.max(...accounts.map(a => a.name.length));
 const pad    = (name) => `[${name.padEnd(maxLen)}]`;
 
 function startAccount(account) {
-  const { name, TV_USER, TV_API_KEY, NTFY_CHANNEL, ...extras } = account;
+  const { name, engine_type, TV_USER, TV_API_KEY, ALPACA_KEY, ALPACA_SECRET, NTFY_CHANNEL, ...extras } = account;
+  const isAlpaca = engine_type === "alpaca";
 
-  if (!TV_USER || !TV_API_KEY) {
-    console.error(`${pad(name)} ❌  Missing TV_USER or TV_API_KEY — skipping`);
-    return;
+  if (isAlpaca) {
+    if (!ALPACA_KEY || !ALPACA_SECRET) {
+      console.error(`${pad(name)} ❌  Missing ALPACA_KEY or ALPACA_SECRET — skipping`);
+      return;
+    }
+  } else {
+    if (!TV_USER || !TV_API_KEY) {
+      console.error(`${pad(name)} ❌  Missing TV_USER or TV_API_KEY — skipping`);
+      return;
+    }
   }
 
   const entry = procs.get(name) || { restarts: 0, lastStart: 0 };
@@ -263,21 +346,33 @@ function startAccount(account) {
   }
 
   // Merge base env + account overrides
-  const env = {
-    ...process.env,          // inherits SYMBOL, STOP_LOSS_TICKS, etc. from base .env
-    TV_USER,
-    TV_API_KEY,
-    ...(NTFY_CHANNEL ? { NTFY_CHANNEL } : {}),
-    ...extras,               // any extra per-account overrides (MAX_CONTRACTS, etc.)
-    ACCOUNT_LABEL: name,     // passed to engine for log prefixing
-    MULTI_ACCOUNT: "1",      // tells engine to emit [BUNDLE] events instead of sending ntfy
-  };
+  const env = isAlpaca
+    ? {
+        ...process.env,
+        ALPACA_KEY,
+        ALPACA_SECRET,
+        ...(NTFY_CHANNEL ? { NTFY_CHANNEL } : {}),
+        ...extras,
+        ACCOUNT_LABEL: name,
+        MULTI_ACCOUNT: "1",
+      }
+    : {
+        ...process.env,
+        TV_USER,
+        TV_API_KEY,
+        ...(NTFY_CHANNEL ? { NTFY_CHANNEL } : {}),
+        ...extras,
+        ACCOUNT_LABEL: name,
+        MULTI_ACCOUNT: "1",
+      };
 
-  console.log(`${pad(name)} ▶  Starting engine (restart #${entry.restarts})`);
+  const engineScript = isAlpaca ? ENGINE_ALPACA : ENGINE_TSX;
+  console.log(`${pad(name)} ▶  Starting ${isAlpaca ? "Alpaca" : "TopstepX"} engine (restart #${entry.restarts})`);
 
-  const proc = spawn('node', [ENGINE], {
+  const proc = spawn('node', [engineScript], {
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
+    detached: true,  // own process group — PM2 SIGINT to orchestrator won't kill children
   });
 
   entry.proc      = proc;

@@ -80,6 +80,61 @@ html, body {
   -webkit-app-region: no-drag;
 }
 
+/* ── Auto-update banner ───────────────────────────────────────────────────── */
+#update-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 14px;
+  background: rgba(20, 10, 0, 0.95);
+  border-bottom: 1px solid var(--amber);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--amber);
+}
+
+#update-bar[hidden] { display: none; }
+
+#update-bar-text {
+  flex: 1;
+}
+
+#update-bar-progress {
+  flex: 1;
+  height: 4px;
+  background: rgba(255,170,0,0.15);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+#update-bar-progress[hidden] { display: none; }
+
+#update-bar-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--amber);
+  border-radius: 2px;
+  transition: width 0.4s ease;
+}
+
+#update-bar-btn {
+  display: none;
+  padding: 3px 10px;
+  background: transparent;
+  border: 1px solid var(--amber);
+  color: var(--amber);
+  font-family: var(--font);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+#update-bar-btn:hover {
+  background: var(--amber);
+  color: var(--black);
+}
+
 /* Mac traffic-light spacer — pushes title content past the native buttons */
 .tl-spacer {
   display: none;

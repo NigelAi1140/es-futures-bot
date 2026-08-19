@@ -42,7 +42,7 @@ const TP_T      = 42;       // ticks
 // Session windows (UTC) — mirrors live engine
 const inSession = (t) => {
   const hm = new Date(t * 1000).getUTCHours() * 100 + new Date(t * 1000).getUTCMinutes();
-  return (hm >= 1345 && hm < 1500) || (hm >= 1830 && hm < 2030);
+  return (hm >= 1345 && hm < 1500) || (hm >= 1830 && hm < 1900);
 };
 
 // ── Logging ───────────────────────────────────────────────────────────────────

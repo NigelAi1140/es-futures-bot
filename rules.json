@@ -1,50 +1,618 @@
 {
-  "watchlist": ["BTCUSDT"],
-  "default_timeframe": "1m",
-
-  "strategy": {
-    "name": "VWAP + RSI(3) + EMA(8) Scalping Strategy",
-    "sources": ["Lewis Jackson"],
-    "description": "Three indicators, each doing a different job. EMA(8) for trend direction, VWAP for session bias, RSI(3) for entry timing. All three must align before a trade fires."
+  "version": "3.0",
+  "lastUpdated": "2026-04-28",
+  "markets": [
+    "ES1!",
+    "NQ1!",
+    "GC1!"
+  ],
+  "default_timeframe": "5m",
+  "session_window_mt": {
+    "start": "07:15",
+    "end": "09:00"
   },
-
-  "indicators": {
-    "ema_8": "Trend direction. Price above EMA(8) = bullish momentum. Below = bearish.",
-    "vwap": "Session bias. Price above VWAP = buyers in control. Below = sellers. Resets at midnight UTC.",
-    "rsi_3": "Entry timing. RSI on 3 candles only — extremely sensitive. Below 30 in an uptrend = snap-back setup. Above 70 in a downtrend = reversal likely."
+  "max_trades_per_day": 10,
+  "paper_trading": true,
+  "min_paper_trades_before_live": 50,
+  "contracts": {
+    "ES1!": {
+      "symbol": "ES",
+      "expiry": "202606",
+      "exchange": "CME",
+      "tick": 0.25,
+      "tick_value": 12.5
+    },
+    "NQ1!": {
+      "symbol": "NQ",
+      "expiry": "202606",
+      "exchange": "CME",
+      "tick": 0.25,
+      "tick_value": 5.0
+    },
+    "GC1!": {
+      "symbol": "GC",
+      "expiry": "202606",
+      "exchange": "NYMEX",
+      "tick": 0.1,
+      "tick_value": 10.0
+    }
   },
-
-  "bias_criteria": {
-    "bullish": ["Price is above VWAP", "Price is above EMA(8)"],
-    "bearish": ["Price is below VWAP", "Price is below EMA(8)"]
-  },
-
-  "entry_rules": {
-    "long": [
-      "Price is above VWAP — buyers in control for the session",
-      "Price is above EMA(8) — uptrend confirmed",
-      "RSI(3) has dropped below 30 — short-term pullback in an uptrend, snap-back likely"
-    ],
-    "short": [
-      "Price is below VWAP — sellers in control",
-      "Price is below EMA(8) — downtrend confirmed",
-      "RSI(3) has spiked above 70 — overbought in a downtrend, reversal likely"
+  "risk": {
+    "stop_ticks": 10,
+    "target_ticks": 20,
+    "rr_ratio": "2:1",
+    "max_distance_from_vwap_pct": 0.5,
+    "rsi_trade_range": [
+      30,
+      70
     ]
   },
-
-  "exit_rules": [
-    "Exit when RSI(3) crosses back above 50 (for longs) or below 50 (for shorts)",
-    "Hard stop: 0.3% below entry for longs, 0.3% above entry for shorts",
-    "Take profit at next VWAP touch or EMA(8) cross"
+  "strategies": {
+    "TJR": {
+      "name": "TJR Smart Money",
+      "sources": [
+        "TJR Trading",
+        "ICT concepts"
+      ],
+      "markets": [
+        "ES1!",
+        "NQ1!"
+      ],
+      "style": "intraday",
+      "timeframes": {
+        "bias": "4H/1H",
+        "entry": "5m/1m"
+      },
+      "long": [
+        "Price swept below a key support level (wick through, then close back above)",
+        "5m Break of Structure confirmed: most recent swing high is higher than the prior swing high",
+        "Price is above VWAP",
+        "RSI(14) between 30\u201370"
+      ],
+      "short": [
+        "Price swept above a key resistance level (wick through, then close back below)",
+        "5m Break of Structure confirmed: most recent swing low is lower than the prior swing low",
+        "Price is below VWAP",
+        "RSI(14) between 30\u201370"
+      ],
+      "key_levels_es": [
+        7208,
+        7200,
+        7186,
+        7136,
+        7085,
+        7079,
+        7008,
+        6928
+      ],
+      "stop": "Below the sweep wick low (long) or above sweep wick high (short)",
+      "target": "Next key level or 2:1 R:R minimum",
+      "enabled": false,
+      "status": "PAUSED \u2014 losing PF<1.0 in isolation",
+      "key_levels_last_updated": "2026-04-27"
+    },
+    "ORB": {
+      "name": "NY Opening Range Breakout",
+      "sources": [
+        "MambaFX",
+        "DoyleStyle"
+      ],
+      "markets": [
+        "NQ1!",
+        "ES1!"
+      ],
+      "style": "intraday",
+      "timeframes": {
+        "range": "1m (9:30\u20139:45 AM ET)",
+        "entry": "5m"
+      },
+      "session_et": {
+        "range_start": "09:30",
+        "range_end": "09:45",
+        "trade_window_end": "12:00"
+      },
+      "session_mt": {
+        "range_start": "07:30",
+        "range_end": "07:45",
+        "trade_window_end": "10:00"
+      },
+      "long": [
+        "Define ORB: high and low of 9:30\u20139:45 AM ET range (first 15 minutes)",
+        "A full 5m candle (both open AND close) prints entirely above the ORB high",
+        "Price pulls back to retest the ORB high from above (retest entry \u2014 higher probability)",
+        "200 EMA is below current price (uptrend filter)",
+        "13 EMA is above 50 EMA (momentum filter)"
+      ],
+      "short": [
+        "Define ORB: high and low of 9:30\u20139:45 AM ET range (first 15 minutes)",
+        "A full 5m candle (both open AND close) prints entirely below the ORB low",
+        "Price pulls back to retest the ORB low from below (retest entry \u2014 higher probability)",
+        "200 EMA is above current price (downtrend filter)",
+        "13 EMA is below 50 EMA (momentum filter)"
+      ],
+      "stop": "Opposite side of the ORB box (long stop below ORB low, short stop above ORB high)",
+      "target": "2R (twice the stop distance)",
+      "enabled": false,
+      "status": "PAUSED \u2014 losing PF<1.0 in isolation"
+    },
+    "ICT": {
+      "name": "ICT 2022 Model",
+      "sources": [
+        "Inner Circle Trader"
+      ],
+      "markets": [
+        "ES1!",
+        "NQ1!"
+      ],
+      "style": "intraday",
+      "timeframes": {
+        "bias": "Daily/4H",
+        "entry": "5m/1m"
+      },
+      "kill_zones_mt": [
+        "07:30\u201308:30 (London close / NY open)"
+      ],
+      "long": [
+        "HTF bias is bullish (price above prior day high or 4H trend is up)",
+        "Price trades down into a Bullish Fair Value Gap (FVG) \u2014 unfilled imbalance from prior bullish move",
+        "FVG is within a known support zone or prior swing low area",
+        "5m candle closes back into (or above) the FVG midpoint",
+        "RSI(14) between 30\u201370, not at extreme"
+      ],
+      "short": [
+        "HTF bias is bearish (price below prior day low or 4H trend is down)",
+        "Price trades up into a Bearish Fair Value Gap (FVG) \u2014 unfilled imbalance from prior bearish move",
+        "FVG is within a known resistance zone or prior swing high area",
+        "5m candle closes back below (or into) the FVG midpoint",
+        "RSI(14) between 30\u201370, not at extreme"
+      ],
+      "stop": "Beyond the FVG extreme (below lowest low of FVG for longs, above highest high for shorts)",
+      "target": "Next opposing FVG or 2:1 R:R minimum",
+      "enabled": false,
+      "status": "PAUSED \u2014 losing PF<1.0 in isolation"
+    },
+    "AVWAP": {
+      "name": "Anchored VWAP Pullback",
+      "sources": [
+        "Brian Shannon / general institutional"
+      ],
+      "markets": [
+        "ES1!"
+      ],
+      "style": "intraday",
+      "timeframes": {
+        "anchor": "Daily/Weekly swing",
+        "entry": "5m"
+      },
+      "long": [
+        "Identify a significant recent low (last 5\u201320 days) \u2014 anchor VWAP from that point",
+        "Price has been trending above the anchored VWAP since the anchor date",
+        "Price pulls back to touch or just below the anchored VWAP",
+        "A bullish 5m candle (engulfing or hammer) closes back above the anchored VWAP",
+        "Session VWAP is also rising and below current price",
+        "RSI(14) between 35\u201355 (TUNED \u2014 was 30-60, tighter band = +PF 1.5)"
+      ],
+      "short": [
+        "Identify a significant recent high \u2014 anchor VWAP from that point",
+        "Price has been trending below the anchored VWAP since the anchor",
+        "Price rallies up to touch or just above the anchored VWAP",
+        "A bearish 5m candle closes back below the anchored VWAP",
+        "Session VWAP is declining and above current price",
+        "RSI(14) between 45\u201365 (TUNED \u2014 was 40-70, tighter band = +PF 1.5)"
+      ],
+      "stop": "Beyond the anchored VWAP by 1 ATR (approximately 8\u201310 ticks on ES)",
+      "target": "Prior swing low/high or 2:1 R:R minimum",
+      "enabled": true,
+      "status": "LIVE PAPER \u2014 TUNED v2 (PF 4.71)",
+      "notes": "Tested NQ/GC 2026-04-26 \u2014 both failed (PF<1.0). ES-only.",
+      "backtest_v2": {
+        "pf": 4.712,
+        "wr_pct": 71.43,
+        "trades": 14,
+        "pnl_usd": 1930,
+        "max_dd_pct": 1.2,
+        "rules": "stop=10 ticks, target=20 ticks, RSI 35-55 long / 45-65 short, ES1! 5m only"
+      }
+    },
+    "RSI2": {
+      "name": "RSI(2) Reversal (Connors)",
+      "sources": [
+        "Larry Connors \u2014 Short Term Trading Strategies That Work"
+      ],
+      "markets": [
+        "ES1!"
+      ],
+      "style": "intraday mean-reversion",
+      "timeframes": {
+        "entry": "5m"
+      },
+      "long": [
+        "RSI(2) < 5 (TUNED \u2014 was <10, more extreme threshold)",
+        "Price > 200 EMA (HTF bullish bias)",
+        "Price > VWAP (added filter, +PF 0.13)"
+      ],
+      "short": [
+        "RSI(2) > 95 (TUNED \u2014 was >90)",
+        "Price < 200 EMA",
+        "Price < VWAP"
+      ],
+      "stop": "10 ticks",
+      "target": "20 ticks (2:1)",
+      "notes": "Pure mean-reversion. Wins after extreme oversold/overbought prints in trend direction.",
+      "enabled": true,
+      "status": "LIVE PAPER \u2014 TUNED v2 (PF 1.26)",
+      "backtest_v2": {
+        "pf": 1.256,
+        "wr_pct": 40,
+        "trades": 20,
+        "pnl_usd": 400,
+        "max_dd_pct": 3.49,
+        "rules": "stop=10 tk, target=20 tk, RSI2 5/95 with VWAP filter, ES1! 5m"
+      }
+    },
+    "EMAPB": {
+      "name": "EMA21 Pullback (Minervini-style)",
+      "sources": [
+        "Mark Minervini \u2014 Trade Like a Stock Market Wizard"
+      ],
+      "markets": [
+        "ES1!"
+      ],
+      "style": "intraday trend-following",
+      "timeframes": {
+        "entry": "5m"
+      },
+      "long": [
+        "Close > 200 EMA",
+        "21 EMA > 50 EMA",
+        "21 EMA RISING (ema21 > ema21[5]) \u2014 TUNED filter",
+        "Price pulls back to touch 21 EMA",
+        "Closes back above 21 EMA",
+        "Bull candle (close>open AND close>prev close)",
+        "RSI(14) 40-60 (TUNED \u2014 was 30-70, tighter band)"
+      ],
+      "short": [
+        "Close < 200 EMA",
+        "21 EMA < 50 EMA",
+        "21 EMA FALLING (ema21 < ema21[5]) \u2014 TUNED filter",
+        "Price pulls up to touch 21 EMA",
+        "Closes back below 21 EMA",
+        "Bear candle",
+        "RSI(14) 40-60 (TUNED \u2014 was 30-70)"
+      ],
+      "stop": "10 ticks",
+      "target": "20 ticks (2:1)",
+      "notes": "Tested NQ 2026-04-27 \u2014 PF 0.69, ES-only.",
+      "enabled": true,
+      "status": "LIVE PAPER \u2014 TUNED v2 (PF 1.60)",
+      "backtest_v2": {
+        "pf": 1.595,
+        "wr_pct": 45.83,
+        "trades": 24,
+        "pnl_usd": 1005,
+        "max_dd_pct": 2.63,
+        "rules": "stop=10, target=20, EMA21 rising, RSI 40-60, ES1! 5m only"
+      }
+    },
+    "BBSQ": {
+      "name": "Bollinger Squeeze Breakout",
+      "sources": [
+        "John Bollinger \u2014 Bollinger on Bollinger Bands"
+      ],
+      "markets": [
+        "ES1!",
+        "NQ1!"
+      ],
+      "style": "intraday volatility breakout",
+      "timeframes": {
+        "entry": "5m"
+      },
+      "params": {
+        "bb_length": 20,
+        "bb_mult": 2.0,
+        "squeeze_lookback_bars": 120
+      },
+      "long": [
+        "BB width is at lowest in last 120 bars (squeeze)",
+        "Next bar closes above prior BB upper band",
+        "Close > 200 EMA"
+      ],
+      "short": [
+        "BB width is at lowest in last 120 bars",
+        "Next bar closes below prior BB lower band",
+        "Close < 200 EMA"
+      ],
+      "stop": "10 ticks",
+      "target": "20 ticks (2:1)",
+      "notes": "Volatility expansion play. Rare but high-quality when volatility had compressed.",
+      "enabled": false,
+      "status": "DEFERRED \u2014 only 1 signal, need more data"
+    },
+    "VOLBO": {
+      "name": "Volume-Confirmed Breakout",
+      "sources": [
+        "Classic momentum trading"
+      ],
+      "markets": [
+        "ES1!"
+      ],
+      "long": [
+        "Close > 20-bar high",
+        "Volume > 1.5\u00d7 20-bar volume avg",
+        "Close > 200 EMA"
+      ],
+      "short": [
+        "Close < 20-bar low",
+        "Volume > 1.5\u00d7 20-bar volume avg",
+        "Close < 200 EMA"
+      ],
+      "stop": "10 ticks",
+      "target": "20 ticks (2:1)",
+      "enabled": true,
+      "status": "LIVE PAPER",
+      "backtest_isolated": {
+        "pf": 1.162,
+        "wr": 40.0,
+        "trades": 35,
+        "pnl_2c": 850
+      }
+    },
+    "KELTNER": {
+      "name": "Keltner Mean-Reversion",
+      "sources": [
+        "Chester Keltner \u2014 How To Make Money in Commodities (1960)"
+      ],
+      "markets": [
+        "ES1!"
+      ],
+      "params": {
+        "ema": 20,
+        "atr_len": 20,
+        "atr_mult": 1.5
+      },
+      "long": [
+        "Prior bar closed below KC lower (EMA20 - 1.5\u00d7ATR)",
+        "Current bar closes back above KC lower",
+        "Close > 200 EMA",
+        "RSI > 30"
+      ],
+      "short": [
+        "Prior bar closed above KC upper (EMA20 + 1.5\u00d7ATR)",
+        "Current bar closes back below KC upper",
+        "Close < 200 EMA",
+        "RSI < 70"
+      ],
+      "stop": "10 ticks",
+      "target": "20 ticks (2:1)",
+      "enabled": true,
+      "status": "LIVE PAPER",
+      "backtest_isolated": {
+        "pf": 1.885,
+        "wr": 50.0,
+        "trades": 8,
+        "pnl_2c": 920
+      }
+    },
+    "MACDD": {
+      "name": "MACD Histogram Divergence",
+      "enabled": false,
+      "status": "REJECTED \u2014 only 4 signals in 58 days, PF 0.63"
+    },
+    "HA_FLIP": {
+      "name": "Heikin-Ashi Color Flip",
+      "sources": [
+        "Munehisa Homma (rice trader, 1700s)"
+      ],
+      "markets": [
+        "ES1!"
+      ],
+      "long": [
+        "HA candle just turned green (close > open) AFTER prior bar was red",
+        "Close > 200 EMA (HTF bullish bias)"
+      ],
+      "short": [
+        "HA candle just turned red (close < open) AFTER prior bar was green",
+        "Close < 200 EMA (HTF bearish bias)"
+      ],
+      "stop": "10 ticks",
+      "target": "20 ticks (2:1)",
+      "enabled": true,
+      "status": "LIVE PAPER \u2014 TUNED v7",
+      "backtest_isolated": {
+        "pf": 1.783,
+        "wr": 48.61,
+        "trades": 72,
+        "pnl_2c": 7530,
+        "max_dd_pct": 4.15
+      },
+      "tweak_findings": {
+        "tight_rsi_40_60": "\u274c HURTS \u2014 color flip IS the momentum signal, RSI prunes good entries",
+        "remove_trend_filter": "\u274c HURTS \u2014 too many counter-trend false flips without it",
+        "winning_config": "EMA200 trend ON, no RSI filter (best single-strategy DD 4.15%)"
+      }
+    },
+    "STOCH": {
+      "name": "Stochastic Crossover",
+      "sources": [
+        "George Lane (1950s)"
+      ],
+      "markets": [
+        "ES1!"
+      ],
+      "params": {
+        "k_period": 14,
+        "d_smooth": 3,
+        "oversold": 20,
+        "overbought": 80
+      },
+      "long": [
+        "Stoch %K crosses above %D AND %K < 20",
+        "Close > 200 EMA"
+      ],
+      "short": [
+        "Stoch %K crosses below %D AND %K > 80",
+        "Close < 200 EMA"
+      ],
+      "stop": "10 ticks",
+      "target": "20 ticks (2:1)",
+      "enabled": true,
+      "status": "LIVE PAPER \u2014 TUNED v8 (PF 2.26 isolated, 20/80 thresholds)",
+      "backtest_isolated": {
+        "pf": 2.262,
+        "pnl": 1640,
+        "n": 11,
+        "dd_pct": 3.22,
+        "verdict": "\ud83c\udfc6 WINNER"
+      },
+      "tweak_findings": {
+        "30_70_thresholds": "PF 1.57 \u2014 too loose, more trades but lower quality",
+        "20_80_thresholds": "\ud83c\udfc6 PF 2.26 \u2014 fewer signals, much higher quality",
+        "trend_filter": "REQUIRED \u2014 without 200 EMA filter, mean-reverts too much"
+      }
+    },
+    "INSIDE_BAR": {
+      "name": "Inside Bar Breakout",
+      "enabled": false,
+      "status": "REJECTED \u2014 PF 0.84 in 58 days, too many false breakouts on 5m"
+    }
+  },
+  "hard_rules": [
+    "Never trade with RSI above 70 or below 30",
+    "Never trade if price is more than 0.5% away from session VWAP",
+    "Never exceed 10 trades per day across all markets",
+    "Always use bracket orders \u2014 entry + stop + target submitted together",
+    "Paper trade only until 50 trades logged and strategy-scores.json shows confidence \u2265 0.55",
+    "No new trades if an existing open position is already at max risk",
+    "Do not trade the first 5 minutes of NY open (9:30\u20139:35 AM ET) \u2014 too chaotic"
   ],
-
-  "risk_rules": [
-    "Risk maximum 1% of portfolio per trade",
-    "Maximum trade size capped by MAX_TRADE_SIZE_USD in .env",
-    "Maximum trades per day capped by MAX_TRADES_PER_DAY in .env",
-    "Do not trade if price is more than 1.5% away from VWAP — overextended",
-    "Paper trade first — validate this strategy on your specific asset before going live"
+  "confidence_thresholds": {
+    "min_to_trade": 0.4,
+    "prefer_above": 0.55,
+    "pause_below_with_10_trades": 0.4
+  },
+  "backtest_2026_04_25": {
+    "winner": "AVWAP",
+    "config": "stop=10, target=20, AVWAP-only on ES1! 5m",
+    "metrics": {
+      "pnl_usd": 2030,
+      "win_rate_pct": 63.16,
+      "profit_factor": 3.231,
+      "trades": 19,
+      "max_dd_pct": 2.65
+    },
+    "ranking_by_pf": [
+      {
+        "name": "AVWAP",
+        "pf": 3.231,
+        "status": "PRIMARY"
+      },
+      {
+        "name": "AVWAP+TJR",
+        "pf": 1.633,
+        "status": "fallback"
+      },
+      {
+        "name": "ALL_ON",
+        "pf": 1.005,
+        "status": "deprecated"
+      },
+      {
+        "name": "ORB",
+        "pf": 0.919,
+        "status": "PAUSED \u2014 losing"
+      },
+      {
+        "name": "TJR",
+        "pf": 0.796,
+        "status": "PAUSED \u2014 losing"
+      },
+      {
+        "name": "ICT",
+        "pf": 0.696,
+        "status": "PAUSED \u2014 losing"
+      }
+    ]
+  },
+  "concurrent_trades": {
+    "enabled": true,
+    "rule": "One open position per strategy at a time; up to 7 strategies can be open simultaneously",
+    "pyramiding_per_strategy": 1,
+    "max_total_concurrent": 7
+  },
+  "backtest_2026_04_25_v3b": {
+    "winner": "v3b_all_7_RSI2_5_95",
+    "metrics": {
+      "pnl_usd": 3517,
+      "win_rate_pct": 37.88,
+      "profit_factor": 1.171,
+      "trades": 264,
+      "max_dd_pct": 9.07
+    },
+    "improvement_over_v1": "+5311 USD (54x baseline)"
+  },
+  "risk_controls": {
+    "contracts_per_trade": 2,
+    "per_trade_risk_usd": 260.0,
+    "per_trade_risk_pct": 1.04,
+    "max_concurrent_strategies": 3,
+    "max_concurrent_risk_usd": 780.0,
+    "max_concurrent_risk_pct": 3.12,
+    "daily_soft_stop_usd": -650,
+    "daily_soft_stop_pct": -2.6,
+    "daily_hard_stop_usd": -1000,
+    "daily_hard_stop_pct": -4.0,
+    "historical_max_dd_pct_2c": -18.14
+  },
+  "active_strategies_2026_04_26": [
+    "AVWAP",
+    "EMAPB",
+    "RSI2"
   ],
-
-  "notes": "Scalping strategy — designed for 1m to 5m timeframes. RSI(3) is intentionally fast and sensitive. Do not apply to higher timeframes."
+  "paused_strategies_2026_04_26": [
+    "TJR",
+    "ORB",
+    "ICT",
+    "BBSQ"
+  ],
+  "position_sizing": {
+    "contracts_per_trade": 2,
+    "rationale": "User requirement: minimum 1% of account per trade. 2 contracts \u00d7 $125 stop = $260 = 1.04%",
+    "scales_per_strategy": "All strategies use 2 contracts uniformly"
+  },
+  "active_version": "v9",
+  "active_metrics": {
+    "pnl_usd": 17160,
+    "pnl_pct": 68.64,
+    "pf": 1.73,
+    "wr_pct": 47.49,
+    "trades": 179,
+    "max_dd_usd": 2685,
+    "max_dd_pct": 10.65,
+    "backtest_period": "2026-03-01 to 2026-04-28 (58 days)",
+    "contracts_per_trade": 2,
+    "improvement_vs_v8": "+$3,220 (+23%) by loosening cooldown to 3 consecutive losses"
+  },
+  "key_lessons": [
+    "All winning strategies are ES1!-specific \u2014 both AVWAP and EMAPB fail on NQ1!",
+    "Tight RSI (35-55 / 40-60) is universal magic filter \u2014 works for BOTH mean-reversion AND trend strategies",
+    "Trail-to-BE helps mean-reversion (AVWAP) but DESTROYS trend strategies (EMAPB)",
+    "Volume confirmation hurts mean-reversion entries (counter-intuitive but true)",
+    "Adding signals via concurrent strategies (3 active) gives +$2,810 vs running AVWAP alone"
+  ],
+  "active_strategies_2026_04_27": [
+    "AVWAP",
+    "EMAPB",
+    "RSI2",
+    "VOLBO",
+    "KELTNER",
+    "HA_FLIP",
+    "STOCH"
+  ],
+  "risk_management": {
+    "cooldown_after_consecutive_losses": true,
+    "cooldown_loss_count": 3,
+    "cooldown_minutes": 30,
+    "cooldown_bars_5min": 6,
+    "rationale": "At 7 strategies, diversity buffers cluster risk. 3-loss threshold lets system run while still preventing rare blowup days."
+  }
 }

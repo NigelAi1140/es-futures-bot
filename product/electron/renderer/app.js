@@ -76,6 +76,8 @@ const state = {
   fullConfig:  null,   // full config object from main, used by settings panel
 };
 
+let _settingsAccounts = [];  // working copy of broker.accounts while settings panel is open
+
 /* ── DOM refs ─────────────────────────────────────────────────────────────── */
 const $acctList   = document.getElementById("account-list");
 const $log        = document.getElementById("log");
@@ -127,6 +129,7 @@ function appendLog(account, message, { isErr = false } = {}) {
 }
 
 function classifyLine(msg, isErr) {
+  if (/Calendar fetch failed/i.test(msg))       return "is-warn";
   if (isErr)                                    return "is-err";
   if (/Restarting|RESTART/i.test(msg))          return "is-warn";
   if (/limit reached|halted|⛔/i.test(msg))     return "is-warn";
@@ -265,6 +268,17 @@ function setPausedUI(paused) {
 function openSettings() {
   const overlay = document.getElementById("overlay-settings");
 
+  const isAlpaca = state.fullConfig?.broker?.type === "alpaca";
+  const meterWrap = document.getElementById("pass-meter-wrap");
+  const paperBadge = document.getElementById("paper-mode-badge");
+  if (meterWrap)  meterWrap.hidden  = isAlpaca;
+  if (paperBadge) paperBadge.hidden = !isAlpaca;
+
+  // Update REC labels for Alpaca (MES scale) vs TopstepX (ES scale)
+  document.querySelectorAll("[data-rec-topstep]").forEach(el => {
+    el.textContent = isAlpaca ? el.dataset.recAlpaca : el.dataset.recTopstep;
+  });
+
   // Populate from state.fullConfig if available, else from current sidebar values
   const cfg = state.fullConfig;
   if (cfg) {
@@ -279,12 +293,14 @@ function openSettings() {
     setValue("cfg-max-stop",   t.maxStopTicks);
     setValue("cfg-tp",         t.takeProfitTicks);
     setValue("cfg-trail",      t.trailTicks);
-    setStopMode(t.stopMode ?? "trail");
+    setStopMode(t.stopMode ?? null);
 
     setCheck("cfg-trend-enabled", f.enabled ?? true);
     setValue("cfg-trend-up",  f.uptrendThreshold);
     setValue("cfg-trend-dn",  f.downtrendThreshold);
 
+    const rfEl = document.getElementById("cfg-regime-filter");
+    if (rfEl) rfEl.value = t.regimeFilter ?? "auto";
     // Build strategy toggles
     const container = document.getElementById("settings-strategies");
     container.innerHTML = "";
@@ -297,16 +313,105 @@ function openSettings() {
     }
   }
 
+  // Accounts section (TopstepX only)
+  const acctSection = document.getElementById("settings-accounts-section");
+  if (acctSection) acctSection.style.display = isAlpaca ? "none" : "";
+  if (!isAlpaca && cfg) renderAccountsList(cfg.broker?.accounts ?? []);
+
+  // NTFY channel
+  const ntfyEl = document.getElementById("cfg-ntfy");
+  if (ntfyEl) ntfyEl.value = cfg?.notifications?.ntfyChannel ?? "";
+
   document.getElementById("settings-msg").textContent = "";
   overlay.removeAttribute("hidden");
   updatePassMeter();
 }
 window.openSettings = openSettings;
 
+function resetToRecommended() {
+  const isAlpaca = state.fullConfig?.broker?.type === "alpaca";
+  setValue("cfg-daily-loss", isAlpaca ? 140  : 1400);
+  setValue("cfg-profit-cap", isAlpaca ? 200  : 2000);
+  setValue("cfg-contracts",  isAlpaca ? 1    : 1);
+  setValue("cfg-trail",      8);
+  setValue("cfg-stop",       10);
+  setValue("cfg-max-stop",   20);
+  setValue("cfg-tp",         48);
+  setStopMode(null);
+  setValue("cfg-trend-up",   10);
+  setValue("cfg-trend-dn",   6);
+  document.getElementById("cfg-trend-enabled").checked = true;
+  const rfEl = document.getElementById("cfg-regime-filter");
+  if (rfEl) rfEl.value = "auto";
+  updatePassMeter();
+}
+
 function closeSettings() {
   document.getElementById("overlay-settings").setAttribute("hidden", "");
 }
 window.closeSettings = closeSettings;
+
+function renderAccountsList(accounts) {
+  _settingsAccounts = accounts.map(a => ({ ...a }));
+  const list = document.getElementById("settings-accounts-list");
+  if (!list) return;
+  list.innerHTML = "";
+  _settingsAccounts.forEach((acct, i) => {
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;align-items:center;gap:6px;margin-bottom:4px";
+    row.innerHTML = `<span style="flex:1;font-size:11px;color:var(--green-hi);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${acct.name}">${acct.name}</span><span style="font-size:10px;color:var(--green-lo)">${acct.type}</span><button style="background:none;border:1px solid var(--green-lo);color:var(--green-lo);padding:1px 6px;cursor:pointer;font-size:11px" onclick="removeSettingsAccount(${i})">×</button>`;
+    list.appendChild(row);
+  });
+  // Reset add-row state
+  const addRow = document.getElementById("acct-add-row");
+  const addBtn = document.getElementById("btn-add-acct");
+  if (addRow) addRow.style.display = "none";
+  if (addBtn) addBtn.style.display = "";
+}
+
+function removeSettingsAccount(i) {
+  _settingsAccounts.splice(i, 1);
+  renderAccountsList(_settingsAccounts);
+}
+window.removeSettingsAccount = removeSettingsAccount;
+
+function showAddAccountRow() {
+  document.getElementById("acct-add-row").style.display = "flex";
+  document.getElementById("btn-add-acct").style.display = "none";
+  document.getElementById("acct-add-last4").focus();
+}
+window.showAddAccountRow = showAddAccountRow;
+
+async function fetchAndAddAccount() {
+  const last4Input = document.getElementById("acct-add-last4");
+  const msg        = document.getElementById("acct-add-msg");
+  const last4 = (last4Input?.value ?? "").trim();
+  if (last4.length < 4) { msg.textContent = "Enter 4 digits"; return; }
+
+  msg.textContent = "Searching…";
+  try {
+    const result = await window.bot.searchAccounts({
+      username: state.fullConfig.broker.username,
+      apiKey:   state.fullConfig.broker.apiKey,
+    });
+    if (!result.ok) { msg.textContent = result.error; return; }
+
+    const match = result.accounts.find(a => a.last4 === last4 || a.nameLast4 === last4);
+    if (!match) { msg.textContent = "No account with those digits"; return; }
+    if (_settingsAccounts.some(a => a.id === match.id)) { msg.textContent = "Already added"; return; }
+
+    _settingsAccounts.push({
+      id:         match.id,
+      name:       match.name,
+      type:       match.isFunded ? "Funded" : "Combine",
+      strategies: { ...(state.fullConfig?.strategies ?? {}) },
+    });
+    renderAccountsList(_settingsAccounts);
+  } catch (e) {
+    msg.textContent = e.message;
+  }
+}
+window.fetchAndAddAccount = fetchAndAddAccount;
 
 function setStopMode(mode) {
   document.getElementById("stop-fields-trail").style.display = mode === "trail" ? "" : "none";
@@ -322,10 +427,12 @@ window.setStopMode = setStopMode;
 // Baseline 88.8% from V4 3-year ES backtest with recommended settings.
 // Each deviation from the recommended config is penalised based on observed
 // backtest sensitivity. Score is clamped to [38, 95].
-const REC = { contracts: 2, stop: 10, maxStop: 20, tp: 40, trail: 8,
-              trendUp: 10, trendDn: 6, lossLimit: 1400, profitCap: 2000 };
+// REC updated 2026-07-23: stop 13t / TP 42t / trendUp 15pt (backtest sweep optimum)
+const REC = { contracts: 2, stop: 13, maxStop: 20, tp: 42, trail: 8,
+              trendUp: 15, trendDn: 6, lossLimit: 1400, profitCap: 2000 };
 
 function updatePassMeter() {
+  if (state.fullConfig?.broker?.type === "alpaca") return;
   let score = 88.8;
 
   const contracts  = numVal("cfg-contracts")  || REC.contracts;
@@ -333,7 +440,7 @@ function updatePassMeter() {
   const maxStop    = numVal("cfg-max-stop")   || REC.maxStop;
   const tp         = numVal("cfg-tp")         || REC.tp;
   const trail      = numVal("cfg-trail")      || REC.trail;
-  const stopMode   = document.querySelector(".smp-btn.active")?.dataset.mode ?? "trail";
+  const stopMode   = document.querySelector(".smp-btn.active")?.dataset.mode ?? null;
   const trendOn    = document.getElementById("cfg-trend-enabled")?.checked ?? true;
   const trendUp    = numVal("cfg-trend-up")   || REC.trendUp;
   const trendDn    = numVal("cfg-trend-dn")   || REC.trendDn;
@@ -347,38 +454,39 @@ function updatePassMeter() {
   if (contracts > 2) score -= (contracts - 2) * 5.5;
   if (contracts > 4) score -= (contracts - 4) * 4;   // steeper above 4
 
-  // Stop loss: too tight = whipsawed out; too loose = bigger losers
+  // Stop loss: sweet spot 11–15t; too tight = whipsawed; too loose = bigger losers
   if (stop < 8)  score -= (8  - stop) * 3.5;
-  if (stop > 12) score -= (stop - 12) * 2.0;
+  if (stop > 15) score -= (stop - 15) * 2.0;
 
-  // Max stop: should be ~2x stop
+  // Max stop: should be ~1.5x stop
   if (maxStop < stop * 1.5) score -= 4;
   if (maxStop > 30)         score -= (maxStop - 30) * 0.8;
 
-  // Take profit: too tight = cuts winners; too wide = rarely reached
+  // Take profit: sweet spot 38–48t
   if (tp < 30) score -= (30 - tp) * 2.2;
   if (tp > 55) score -= (tp - 55) * 1.0;
 
   // Trail: too tight = stopped out too early
-  if (trail < 6) score -= (6 - trail) * 2.5;
+  if (trail < 6)  score -= (6  - trail) * 2.5;
   if (trail > 12) score -= (trail - 12) * 1.0;
 
   // Trend filter: biggest single edge — disabling it loses ~8–10%
   if (!trendOn) score -= 9.5;
   else {
-    if (trendUp > 14) score -= (trendUp - 14) * 1.0;
+    if (trendUp > 18) score -= (trendUp - 18) * 1.0;
     if (trendUp < 7)  score -= (7 - trendUp)  * 1.5;
     if (trendDn > 9)  score -= (trendDn - 9)  * 1.5;
     if (trendDn < 4)  score -= (4 - trendDn)  * 1.0;
   }
 
-  // Strategies disabled (each active one contributes ~3%)
+  // Strategies: only penalise if more than half are disabled
   let activeStrats = 0;
   document.querySelectorAll("#settings-strategies input[data-strat]").forEach(el => {
     if (el.checked) activeStrats++;
   });
   const totalStrats = document.querySelectorAll("#settings-strategies input[data-strat]").length || 6;
-  score -= (totalStrats - activeStrats) * 3.2;
+  const disabledRatio = totalStrats > 0 ? (totalStrats - activeStrats) / totalStrats : 0;
+  if (disabledRatio > 0.5) score -= (disabledRatio - 0.5) * 30;
 
   // Risk limits: too wide = prop firm disqualification risk
   if (lossLimit > 1450) score -= (lossLimit - 1450) / 100 * 3;
@@ -420,6 +528,8 @@ async function saveSettings() {
     maxStopTicks:    numVal("cfg-max-stop"),
     takeProfitTicks: numVal("cfg-tp"),
     trailTicks:      numVal("cfg-trail"),
+    regimeFilter:        document.getElementById("cfg-regime-filter")?.value ?? "auto",
+    fundedStartBalance:  -1,  // auto-detected on first connect — no longer a manual field
   };
 
   const trendFilter = {
@@ -435,6 +545,16 @@ async function saveSettings() {
   });
 
   const newConfig = { ...state.fullConfig, trading, trendFilter, strategies };
+
+  // Accounts (TopstepX only)
+  const isAlpacaSave = state.fullConfig?.broker?.type === "alpaca";
+  if (!isAlpacaSave && _settingsAccounts.length > 0) {
+    newConfig.broker = { ...newConfig.broker, accounts: _settingsAccounts };
+  }
+
+  // NTFY channel
+  const ntfyVal = (document.getElementById("cfg-ntfy")?.value ?? "").trim();
+  newConfig.notifications = { ...(newConfig.notifications ?? {}), ntfyChannel: ntfyVal, enabled: !!ntfyVal };
 
   try {
     const saveResult = await window.bot.saveConfig(newConfig);
@@ -482,9 +602,25 @@ if (window.bot) {
     document.getElementById("overlay-license").removeAttribute("hidden");
   });
 
-  window.bot.on("license-ok", (email) => {
+  window.bot.on("license-ok", (email, sub) => {
     $licUser.textContent = email ?? "";
     document.getElementById("overlay-license").setAttribute("hidden", "");
+
+    const $days = document.getElementById("license-days");
+    if (!$days || !sub) return;
+
+    if (sub.isFreeLoader) {
+      $days.textContent  = "∞ — Free Loader Edition 🎭";
+      $days.style.color  = "var(--green-hi)";
+      $days.style.display = "block";
+    } else if (sub.daysLeft != null) {
+      const label = sub.isTrial
+        ? `${sub.daysLeft}d left in free trial`
+        : `${sub.daysLeft}d left in billing period`;
+      $days.textContent   = label;
+      $days.style.color   = sub.daysLeft <= 3 ? "#ff4444" : sub.daysLeft <= 7 ? "#ffaa00" : "var(--text-dim)";
+      $days.style.display = "block";
+    }
   });
 
   window.bot.on("config-loaded", async (cfg) => {
@@ -524,7 +660,7 @@ if (window.bot) {
 
     if (/LONG|SHORT|ENTRY|placing order/i.test(line))  setAccountStatus(account, "trading");
     else if (/filled|closed|exit/i.test(line))          setAccountStatus(account, "active");
-    else if (/halted|limit reached/i.test(line))        setAccountStatus(account, "halted");
+    else if (/halted|limit reached/i.test(line) && !/halted:\s*false/i.test(line)) setAccountStatus(account, "halted");
   });
 
   window.bot.on("pnl-update",    ({ account, pnl })     => updateAccountPnl(account, pnl));
@@ -548,8 +684,28 @@ if (window.bot) {
     appendLog(account, `Engine exited — code=${code} signal=${signal}`);
   });
 
-  window.bot.on("update-available", ({ version, url }) => {
-    appendLog("SYSTEM", `Update available: v${version} — ${url}`, {});
+  // Auto-updater UI
+  const $updateBar  = document.getElementById("update-bar");
+  const $updateText = document.getElementById("update-bar-text");
+  const $updateProg = document.getElementById("update-bar-progress");
+  const $updateFill = document.getElementById("update-bar-fill");
+  const $updateBtn  = document.getElementById("update-bar-btn");
+
+  window.bot.on("update-downloading", ({ version }) => {
+    $updateBar.hidden  = false;
+    $updateText.textContent = `⬡ DOWNLOADING UPDATE v${version}…`;
+    $updateProg.hidden = false;
+  });
+
+  window.bot.on("update-progress", ({ percent }) => {
+    $updateFill.style.width = `${percent}%`;
+  });
+
+  window.bot.on("update-ready", ({ version }) => {
+    $updateText.textContent = `⬡ UPDATE v${version} READY — reopen app after installing`;
+    $updateProg.hidden = true;
+    $updateBtn.style.display = "block";
+    appendLog("SYSTEM", `Update v${version} downloaded — click to install, then reopen the app.`, {});
   });
 
   window.bot.on("engine-paused", () => {
@@ -563,6 +719,25 @@ if (window.bot) {
     setPausedUI(false);
     appendLog("SYSTEM", "▶ Engines resuming...", {});
     $connDot.className = "dot dot-on";
+  });
+
+  window.bot.on("regime-update", (data) => {
+    const badge = document.getElementById("regime-badge");
+    if (!badge) return;
+    if (!data.ok && data.error) {
+      badge.textContent = "? REGIME";
+      badge.style.opacity = "0.4";
+      appendLog("SYSTEM", `⚠ Regime check failed: ${data.error}`, {});
+      return;
+    }
+    const icons = { BULL: "🟢", BEAR: "🔴", NEUTRAL: "⚪" };
+    const icon = icons[data.regime] ?? "⚪";
+    badge.textContent = `${icon} ${data.regime}`;
+    badge.style.opacity = data.regime === "NEUTRAL" ? "0.6" : "1";
+    badge.title = `${data.regime} — ${data.bullPoints ?? 0} bull / ${data.bearPoints ?? 0} bear signals\nES $${data.price?.toFixed(1) ?? "—"} | 10-day ${data.tenDayPct >= 0 ? "+" : ""}${data.tenDayPct?.toFixed(1) ?? "—"}%\nClick to re-check`;
+    if (data.changed) {
+      appendLog("SYSTEM", `📊 Regime: ${data.prev} → ${data.regime} | ${(data.reasons ?? []).join("; ")}`, {});
+    }
   });
 }
 
@@ -690,8 +865,11 @@ async function _startupGlitch() {
   if (titleEl) await glitchReveal(titleEl, "ES FUTURES BOT", { speed: 3, frameMs: 35 });
   const verEl = document.getElementById("app-version");
   if (verEl) {
+    const raw = await window.bot.getVersion().catch(() => "?");
+    const v   = `v${raw}`;
+    verEl.textContent = v;
     await _iSleep(200);
-    await glitchReveal(verEl, verEl.textContent, { speed: 2, frameMs: 50 });
+    await glitchReveal(verEl, v, { speed: 2, frameMs: 50 });
   }
 }
 

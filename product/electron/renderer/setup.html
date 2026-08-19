@@ -108,35 +108,254 @@
     margin-top: 4px;
   }
 
-  /* ── Account rows ─────────────────────────────────────────────────────── */
-  .acct-entry {
+  /* ── Account slots ─────────────────────────────────────────────────────── */
+  .acct-slot {
     border: 1px solid var(--panel-bdr);
-    padding: 12px;
-    margin-bottom: 10px;
+    padding: 8px 10px;
+    margin-bottom: 6px;
     background: rgba(0,15,0,0.4);
+    transition: border-color 0.15s;
   }
 
-  .acct-entry .acct-num {
+  .acct-slot.enabled   { border-color: var(--green-lo); }
+  .acct-slot.connected { border-color: var(--green-med); }
+
+  .slot-main-row {
+    display: grid;
+    grid-template-columns: 20px 62px 1fr 48px;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .acct-slot input[type="checkbox"] {
+    width: 14px; height: 14px;
+    accent-color: var(--green-med);
+    cursor: pointer;
+  }
+
+  .slot-digits {
+    background: var(--black);
+    border: 1px solid var(--panel-bdr);
+    color: var(--green-hi);
+    font-family: var(--font);
+    font-size: 14px;
+    letter-spacing: 0.15em;
+    padding: 5px 6px;
+    outline: none;
+    width: 100%;
+    text-align: center;
+    transition: border-color 0.15s;
+  }
+
+  .slot-digits:focus   { border-color: var(--green-lo); }
+  .slot-digits:disabled { opacity: 0.35; cursor: default; }
+
+  .slot-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    overflow: hidden;
+    min-width: 0;
+  }
+
+  .slot-acct-name {
     font-size: 10px;
+    color: var(--green-hi);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .slot-status {
+    font-size: 9px;
+    letter-spacing: 0.08em;
     color: var(--text-dim);
+  }
+
+  .slot-status.ok      { color: var(--green-hi); }
+  .slot-status.err     { color: var(--red); }
+  .slot-status.pending { color: var(--text-dim); }
+
+  .type-badge {
+    display: inline-block;
+    font-size: 8px;
     letter-spacing: 0.1em;
+    padding: 1px 4px;
+    border: 1px solid var(--panel-bdr);
+    color: var(--text-dim);
+    margin-left: 4px;
+  }
+
+  .type-badge.funded  { border-color: var(--green-lo); color: var(--green-hi); }
+  .type-badge.combine { border-color: var(--panel-bdr); color: var(--text-dim); }
+
+  .fetch-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     margin-bottom: 10px;
   }
 
-  .add-acct-btn {
+  .btn-fetch {
     background: none;
-    border: 1px dashed var(--panel-bdr);
+    border: 1px solid var(--panel-bdr);
     color: var(--text-dim);
     font-family: var(--font);
-    font-size: 11px;
-    width: 100%;
-    padding: 8px;
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    padding: 5px 12px;
     cursor: pointer;
+    white-space: nowrap;
     transition: color 0.15s, border-color 0.15s;
+  }
+
+  .btn-fetch:hover { color: var(--green-lo); border-color: var(--green-lo); }
+  .btn-fetch:disabled { opacity: 0.4; cursor: default; }
+
+  .fetch-status {
+    font-size: 10px;
+    color: var(--text-dim);
+  }
+
+  .fetch-status.ok  { color: var(--green-hi); }
+  .fetch-status.err { color: var(--red); }
+
+  /* ── API Key Guide ─────────────────────────────────────────────────────── */
+  .api-guide {
+    margin-top: 6px;
+    margin-bottom: 14px;
+    border: 1px solid var(--panel-bdr);
+  }
+
+  .api-guide-toggle {
+    width: 100%;
+    background: rgba(0,12,0,0.6);
+    border: none;
+    color: var(--text-dim);
+    font-family: var(--font);
+    font-size: 9px;
+    letter-spacing: 0.14em;
+    padding: 7px 10px;
+    cursor: pointer;
+    text-align: left;
+    transition: color 0.15s, background 0.15s;
+  }
+
+  .api-guide-toggle:hover { color: var(--green-lo); background: rgba(0,20,0,0.7); }
+  .api-guide-toggle.open  { color: var(--green-hi); border-bottom: 1px solid var(--panel-bdr); }
+
+  .api-guide-body {
+    display: none;
+    padding: 10px 10px 4px;
+    background: rgba(0,8,0,0.5);
+  }
+
+  .api-guide-body.open { display: block; }
+
+  .guide-step {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    margin-bottom: 12px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid rgba(0,60,0,0.3);
+  }
+
+  .guide-step:last-child { border-bottom: none; margin-bottom: 4px; }
+
+  .guide-num {
+    font-size: 18px;
+    font-weight: 700;
+    color: rgba(0,255,65,0.15);
+    line-height: 1;
+    min-width: 22px;
+    padding-top: 2px;
+    letter-spacing: -0.02em;
+  }
+
+  .guide-content {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .guide-title {
+    font-size: 9px;
+    letter-spacing: 0.14em;
+    color: var(--green-hi);
+    margin-bottom: 3px;
+  }
+
+  .guide-desc {
+    font-size: 10px;
+    color: var(--text-dim);
+    line-height: 1.6;
     margin-bottom: 4px;
   }
 
-  .add-acct-btn:hover { color: var(--green-med); border-color: var(--green-lo); }
+  .guide-link {
+    font-size: 9px;
+    color: var(--green-lo);
+    letter-spacing: 0.08em;
+    cursor: pointer;
+    text-decoration: none;
+    display: inline-block;
+  }
+
+  .guide-link:hover { color: var(--green-hi); }
+
+  .guide-art {
+    flex-shrink: 0;
+    border: 1px solid rgba(0,60,0,0.4);
+    background: #000800;
+  }
+
+  .strat-toggle {
+    background: none;
+    border: 1px solid var(--panel-bdr);
+    color: var(--text-dim);
+    font-family: var(--font);
+    font-size: 9px;
+    letter-spacing: 0.08em;
+    padding: 4px 3px;
+    cursor: pointer;
+    width: 100%;
+    transition: color 0.15s, border-color 0.15s;
+    display: none;
+  }
+
+  .acct-slot.enabled .strat-toggle { display: block; }
+  .strat-toggle:hover { color: var(--green-lo); border-color: var(--green-lo); }
+  .strat-toggle.open  { color: var(--green-hi); border-color: var(--green-lo); }
+
+  .strat-panel {
+    display: none;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--panel-bdr);
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px 12px;
+  }
+
+  .strat-panel.closed { display: none; }
+
+  .strat-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    color: var(--text-dim);
+    cursor: pointer;
+    padding: 2px 0;
+  }
+
+  .strat-row input[type="checkbox"] {
+    width: 12px; height: 12px;
+    accent-color: var(--green-med);
+    cursor: pointer;
+  }
+
+  .strat-row.checked { color: var(--green-hi); }
 
   /* ── Navigation ───────────────────────────────────────────────────────── */
   .setup-nav {
@@ -236,14 +455,100 @@
   .summary-table td { padding: 4px 0; font-size: 11px; }
   .summary-table td:first-child { color: var(--text-dim); width: 40%; }
   .summary-table td:last-child  { color: var(--green-med); word-break: break-all; }
+
+  /* ── Guide side panel ─────────────────────────────────────────────────── */
+  .wbtn-help {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    font-family: var(--font);
+    font-size: 12px;
+    width: 32px;
+    height: 100%;
+    cursor: pointer;
+    transition: color 0.15s;
+    -webkit-app-region: no-drag;
+  }
+  .wbtn-help:hover { color: var(--green-hi); }
+  .wbtn-help.active { color: var(--green-hi); }
+
+  #guide-panel {
+    position: fixed;
+    top: 38px;
+    right: 0;
+    width: 340px;
+    height: calc(100vh - 38px);
+    background: rgba(0,6,0,0.98);
+    border-left: 1px solid var(--green-lo);
+    z-index: 200;
+    display: flex;
+    flex-direction: column;
+    transform: translateX(100%);
+    transition: transform 0.22s ease;
+    box-shadow: -6px 0 30px rgba(0,255,65,0.06);
+  }
+
+  #guide-panel.open { transform: translateX(0); }
+
+  .guide-panel-hdr {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--panel-bdr);
+    font-size: 9px;
+    letter-spacing: 0.18em;
+    color: var(--green-hi);
+    flex-shrink: 0;
+  }
+
+  .guide-panel-close {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    font-size: 12px;
+    cursor: pointer;
+    padding: 2px 6px;
+    transition: color 0.15s;
+  }
+  .guide-panel-close:hover { color: var(--green-hi); }
+
+  .guide-panel-body {
+    overflow-y: auto;
+    padding: 12px 14px 20px;
+    flex: 1;
+  }
+
+  /* Panel steps use same .guide-step / .guide-num / .guide-content / .guide-art classes */
+  #guide-panel .guide-step {
+    margin-bottom: 16px;
+    padding-bottom: 16px;
+  }
+
+  #guide-panel .guide-art {
+    margin-top: 8px;
+    width: 100%;
+    height: auto;
+  }
+
+  #guide-panel .guide-step {
+    flex-direction: column;
+  }
+
+  #guide-panel .guide-num {
+    font-size: 22px;
+    margin-bottom: 4px;
+  }
 </style>
 </head>
 <body>
+<script>if (window.bot?.platform === "darwin") document.body.classList.add("is-mac");</script>
 
 <canvas id="rain"></canvas>
 
 <div id="titlebar">
   <div id="titlebar-left">
+    <div class="tl-spacer"></div>
     <span class="title-logo">⬡</span>
     <span class="title-name">ES FUTURES BOT</span>
     <span class="title-ver">SETUP</span>
@@ -251,6 +556,15 @@
   <div id="titlebar-right">
     <button class="wbtn wbtn-close" onclick="window.bot?.close()">✕</button>
   </div>
+</div>
+
+<!-- Auto-update banner (hidden until an update is ready) -->
+<div id="update-bar" hidden>
+  <span id="update-bar-text">⬡ UPDATE AVAILABLE</span>
+  <div id="update-bar-progress" hidden>
+    <div id="update-bar-fill"></div>
+  </div>
+  <button id="update-bar-btn" onclick="window.bot?.installUpdate()">RESTART TO UPDATE</button>
 </div>
 
 <div id="setup-wrap">
@@ -267,22 +581,23 @@
 
   <!-- ── Step 0: License ─────────────────────────────────────────────────── -->
   <div class="setup-card setup-step active" id="step-0">
-    <div class="card-title">STEP 1 OF 4 — LICENSE</div>
+    <div class="card-title">STEP 1 OF 4 — ACTIVATION</div>
 
     <p style="font-size:11px;color:var(--green-lo);margin-bottom:16px;line-height:1.7">
-      Enter the license key from your Gumroad purchase confirmation email.
+      Enter the email address you used when subscribing on Gumroad.
     </p>
 
     <div class="form-group">
-      <label>LICENSE KEY</label>
+      <label>SUBSCRIPTION EMAIL</label>
       <div class="license-input-area">
-        <input type="text" id="lic-key" placeholder="XXXX-XXXX-XXXX-XXXX" spellcheck="false">
+        <input type="email" id="lic-key" placeholder="you@example.com" spellcheck="false">
         <button class="btn-verify" id="btn-verify-lic">VERIFY</button>
       </div>
-      <div class="hint">Found in your Gumroad purchase email.</div>
+      <div class="hint">The email you used at nigelbot.gumroad.com/l/jzkzn</div>
     </div>
 
-    <div class="verified-badge" id="verified-badge">✓ License verified</div>
+    <div class="verified-badge" id="verified-badge">✓ Subscription verified</div>
+    <div id="sub-days" style="display:none;font-size:9px;letter-spacing:0.1em;margin-top:6px;color:var(--text-dim)"></div>
     <div class="error-msg" id="lic-error"></div>
 
     <div class="setup-nav">
@@ -294,16 +609,51 @@
   <div class="setup-card setup-step" id="step-1">
     <div class="card-title">STEP 2 OF 4 — BROKER</div>
 
-    <div class="form-group">
-      <label>TOPSTEPX USERNAME / EMAIL</label>
-      <input type="text" id="broker-user" placeholder="your@email.com" spellcheck="false">
-      <div class="hint">Your TopstepX account login email.</div>
+    <!-- Broker type toggle -->
+    <div class="form-group" style="margin-bottom:18px">
+      <label>BROKER</label>
+      <div style="display:flex;gap:8px;margin-top:4px">
+        <button type="button" id="broker-tsx-btn" onclick="setBrokerType('topstepx')"
+          style="flex:1;background:rgba(0,40,0,0.8);border:1px solid var(--green-lo);color:var(--green-hi);font-family:var(--font);font-size:10px;letter-spacing:0.12em;padding:7px 4px;cursor:pointer">
+          TOPSTEPX
+        </button>
+        <button type="button" id="broker-alp-btn" onclick="setBrokerType('alpaca')"
+          style="flex:1;background:none;border:1px solid var(--panel-bdr);color:var(--text-dim);font-family:var(--font);font-size:10px;letter-spacing:0.12em;padding:7px 4px;cursor:pointer">
+          ALPACA PAPER
+        </button>
+      </div>
     </div>
 
-    <div class="form-group">
-      <label>SYMBOL</label>
-      <input type="text" id="broker-symbol" value="ES" placeholder="ES">
-      <div class="hint">Futures contract symbol. Default: ES (S&amp;P 500).</div>
+    <!-- TopstepX fields -->
+    <div id="broker-tsx-fields">
+      <div class="form-group">
+        <label>TOPSTEPX USERNAME / EMAIL</label>
+        <input type="text" id="broker-user" placeholder="your@email.com" spellcheck="false">
+        <div class="hint">Your TopstepX account login email.</div>
+      </div>
+      <div class="form-group">
+        <label>SYMBOL</label>
+        <input type="text" id="broker-symbol" value="ES" placeholder="ES">
+        <div class="hint">Futures contract symbol. Default: ES (S&amp;P 500).</div>
+      </div>
+    </div>
+
+    <!-- Alpaca fields -->
+    <div id="broker-alp-fields" style="display:none">
+      <div class="form-group">
+        <label>ALPACA API KEY ID</label>
+        <input type="text" id="alpaca-key" placeholder="PKxxxxxxxxxxxxxxxxxx" spellcheck="false">
+        <div class="hint">From alpaca.markets → Paper Trading → API Keys. Starts with "PK".</div>
+      </div>
+      <div class="form-group">
+        <label>ALPACA SECRET KEY</label>
+        <input type="password" id="alpaca-secret" placeholder="••••••••••••••••••••••••••••••••••••••••" spellcheck="false">
+        <div class="hint">Shown once when you generate the key — keep it safe.</div>
+      </div>
+      <div style="padding:8px 10px;border:1px solid rgba(0,100,0,0.3);background:rgba(0,20,0,0.5);font-size:10px;color:var(--text-dim);line-height:1.6;margin-bottom:4px">
+        Trades MES futures (Micro E-mini S&amp;P 500) on Alpaca's paper account.<br>
+        Enable futures in Alpaca: <span style="color:var(--green-lo)">Account → Trading → Futures → Enable</span>
+      </div>
     </div>
 
     <div class="error-msg" id="broker-error"></div>
@@ -314,16 +664,166 @@
     </div>
   </div>
 
-  <!-- ── Step 2: Accounts (API keys) ──────────────────────────────────────── -->
+  <!-- ── Step 2: Accounts ──────────────────────────────────────────────────── -->
   <div class="setup-card setup-step" id="step-2">
-    <div class="card-title">STEP 3 OF 4 — ACCOUNTS</div>
+    <div style="display:flex;justify-content:space-between;align-items:center" class="card-title">
+      STEP 3 OF 4 — ACCOUNTS
+      <button id="btn-guide-panel" onclick="toggleGuidePanel()" style="background:none;border:1px solid var(--panel-bdr);color:var(--text-dim);font-family:var(--font);font-size:8px;letter-spacing:0.12em;padding:3px 8px;cursor:pointer;transition:color 0.15s,border-color 0.15s" onmouseover="this.style.color='var(--green-hi)';this.style.borderColor='var(--green-lo)'" onmouseout="this.style.color='var(--text-dim)';this.style.borderColor='var(--panel-bdr)'">HOW TO</button>
+    </div>
 
-    <p style="font-size:11px;color:var(--green-lo);margin-bottom:14px;line-height:1.7">
-      Add one account per TopstepX combine. Each needs its own API key from the ProjectX portal.
+    <div class="form-group">
+      <label>TOPSTEPX API KEY</label>
+      <input type="password" id="shared-api-key" placeholder="ProjectX API key" spellcheck="false">
+      <div class="hint">One key covers all your accounts. Found in TopstepX → Settings → API Keys.</div>
+    </div>
+
+    <!-- ── API Key Guide ──────────────────────────────────────────────────── -->
+    <div class="api-guide">
+      <button type="button" class="api-guide-toggle" id="api-guide-btn" onclick="toggleGuidePanel(true)">▸ HOW TO GET YOUR API KEY</button>
+      <div class="api-guide-body" id="api-guide-body" style="display:none">
+
+        <!-- Step 1 -->
+        <div class="guide-step">
+          <div class="guide-num">01</div>
+          <div class="guide-content">
+            <div class="guide-title">CREATE YOUR TOPSTEPX ACCOUNT</div>
+            <div class="guide-desc">Sign up at topstepx.com with your email address and verify your email when prompted.</div>
+            <span class="guide-link" onclick="(window.bot?.openExternal ?? window.open.bind(window))('https://www.topstepx.com')">topstepx.com →</span>
+          </div>
+          <svg class="guide-art" width="130" height="62" viewBox="0 0 130 62" xmlns="http://www.w3.org/2000/svg">
+            <rect width="130" height="62" fill="#000800"/>
+            <rect x="0" y="0" width="130" height="13" fill="#001200"/>
+            <circle cx="8" cy="6.5" r="3" fill="#001f00"/><circle cx="18" cy="6.5" r="3" fill="#001f00"/><circle cx="28" cy="6.5" r="3" fill="#001f00"/>
+            <rect x="38" y="2" width="88" height="9" rx="1.5" fill="#000a00" stroke="#002800" stroke-width="0.5"/>
+            <text x="82" y="9" fill="#004400" font-size="5.5" font-family="monospace" text-anchor="middle">topstepx.com/signup</text>
+            <text x="65" y="25" fill="#00cc44" font-size="6.5" font-family="monospace" text-anchor="middle">CREATE ACCOUNT</text>
+            <rect x="10" y="29" width="110" height="9" rx="1" fill="#001500" stroke="#002800" stroke-width="0.5"/>
+            <text x="15" y="36" fill="#003800" font-size="5" font-family="monospace">EMAIL  ████████████████</text>
+            <rect x="10" y="41" width="110" height="9" rx="1" fill="#001500" stroke="#002800" stroke-width="0.5"/>
+            <text x="15" y="48" fill="#003800" font-size="5" font-family="monospace">PASSWORD  ██████████</text>
+            <rect x="30" y="53" width="70" height="8" rx="1" fill="#002800" stroke="#00aa33" stroke-width="0.5"/>
+            <text x="65" y="59.5" fill="#00ff44" font-size="5.5" font-family="monospace" text-anchor="middle">SIGN UP</text>
+          </svg>
+        </div>
+
+        <!-- Step 2 -->
+        <div class="guide-step">
+          <div class="guide-num">02</div>
+          <div class="guide-content">
+            <div class="guide-title">PURCHASE A TRADING COMBINE</div>
+            <div class="guide-desc">From your TopstepX dashboard, select a Combine or Funded account size and complete checkout.</div>
+            <span class="guide-link" onclick="(window.bot?.openExternal ?? window.open.bind(window))('https://www.topstepx.com/trading-combines/')">View account options →</span>
+          </div>
+          <svg class="guide-art" width="130" height="62" viewBox="0 0 130 62" xmlns="http://www.w3.org/2000/svg">
+            <rect width="130" height="62" fill="#000800"/>
+            <text x="65" y="10" fill="#005500" font-size="5.5" font-family="monospace" text-anchor="middle">SELECT ACCOUNT SIZE</text>
+            <rect x="4" y="14" width="56" height="44" rx="2" fill="#001200" stroke="#002800" stroke-width="0.5"/>
+            <text x="32" y="28" fill="#00aa33" font-size="9" font-family="monospace" text-anchor="middle">50K</text>
+            <text x="32" y="38" fill="#004400" font-size="5" font-family="monospace" text-anchor="middle">COMBINE</text>
+            <rect x="9" y="43" width="46" height="8" rx="1" fill="#001f00" stroke="#003300" stroke-width="0.5"/>
+            <text x="32" y="49" fill="#005500" font-size="5" font-family="monospace" text-anchor="middle">SELECT</text>
+            <rect x="70" y="14" width="56" height="44" rx="2" fill="#001f00" stroke="#00cc44" stroke-width="1"/>
+            <text x="98" y="28" fill="#00ff88" font-size="9" font-family="monospace" text-anchor="middle">100K</text>
+            <text x="98" y="38" fill="#00cc44" font-size="5" font-family="monospace" text-anchor="middle">COMBINE</text>
+            <rect x="75" y="43" width="46" height="8" rx="1" fill="#003300" stroke="#00ff44" stroke-width="0.5"/>
+            <text x="98" y="49" fill="#00ff44" font-size="5" font-family="monospace" text-anchor="middle">SELECT ✓</text>
+          </svg>
+        </div>
+
+        <!-- Step 3 -->
+        <div class="guide-step">
+          <div class="guide-num">03</div>
+          <div class="guide-content">
+            <div class="guide-title">LINK PROJECTX IN TOPSTEPX SETTINGS</div>
+            <div class="guide-desc">From the TopstepX dashboard click <strong style="color:var(--green-lo)">Launch TopstepX</strong>. On the left side click <strong style="color:var(--green-lo)">Settings</strong>. In the top-right of the settings page click the <strong style="color:var(--green-lo)">API</strong> tab. Under ProjectX Linking click <strong style="color:var(--green-lo)">Link</strong> — this creates your free ProjectX Dashboard account.</div>
+            <span class="guide-link" onclick="(window.bot?.openExternal ?? window.open.bind(window))('https://dashboard.projectx.com')">dashboard.projectx.com →</span>
+          </div>
+          <svg class="guide-art" width="130" height="62" viewBox="0 0 130 62" xmlns="http://www.w3.org/2000/svg">
+            <rect width="130" height="62" fill="#000800"/>
+            <rect x="0" y="0" width="130" height="12" fill="#001200"/>
+            <text x="8"  y="8.5" fill="#003800" font-size="5.5" font-family="monospace">PROFILE</text>
+            <rect x="38" y="0" width="26" height="12" fill="#002800"/>
+            <text x="51" y="8.5" fill="#00ff44" font-size="5.5" font-family="monospace" text-anchor="middle">API</text>
+            <text x="72" y="8.5" fill="#003800" font-size="5.5" font-family="monospace">TRADING</text>
+            <text x="104" y="8.5" fill="#003800" font-size="5.5" font-family="monospace">BILLING</text>
+            <text x="8" y="21" fill="#005500" font-size="5" font-family="monospace">PROJECTX LINKING</text>
+            <rect x="8" y="23" width="114" height="15" rx="1" fill="#001500" stroke="#003300" stroke-width="0.5"/>
+            <text x="13" y="33" fill="#005500" font-size="5" font-family="monospace">Status: Not linked</text>
+            <rect x="88" y="25" width="28" height="11" rx="1" fill="#002800" stroke="#00ff44" stroke-width="0.5"/>
+            <text x="102" y="33" fill="#00ff44" font-size="6" font-family="monospace" text-anchor="middle">LINK</text>
+            <text x="8" y="50" fill="#005500" font-size="5" font-family="monospace">API KEYS</text>
+            <rect x="8" y="52" width="114" height="8" rx="1" fill="#001200" stroke="#002200" stroke-width="0.5"/>
+            <text x="65" y="58" fill="#003300" font-size="5" font-family="monospace" text-anchor="middle">— link ProjectX first —</text>
+          </svg>
+        </div>
+
+        <!-- Step 4 -->
+        <div class="guide-step">
+          <div class="guide-num">04</div>
+          <div class="guide-content">
+            <div class="guide-title">SUBSCRIBE TO API ACCESS ($14.50/MO)</div>
+            <div class="guide-desc">On the ProjectX Dashboard go to <strong style="color:var(--green-lo)">Subscriptions → ProjectX API Access</strong>. Use code <strong style="color:var(--green-hi)">topstep</strong> at checkout for a permanent 50% discount — $14.50/mo instead of $29.</div>
+            <span class="guide-link" onclick="(window.bot?.openExternal ?? window.open.bind(window))('https://dashboard.projectx.com')">dashboard.projectx.com →</span>
+          </div>
+          <svg class="guide-art" width="130" height="62" viewBox="0 0 130 62" xmlns="http://www.w3.org/2000/svg">
+            <rect width="130" height="62" fill="#000800"/>
+            <rect x="0" y="0" width="130" height="11" fill="#001200"/>
+            <rect x="4" y="2" width="122" height="7" rx="1" fill="#000a00" stroke="#002200" stroke-width="0.5"/>
+            <text x="65" y="7.5" fill="#004400" font-size="5" font-family="monospace" text-anchor="middle">dashboard.projectx.com/subscriptions</text>
+            <rect x="8" y="13" width="114" height="44" rx="2" fill="#001500" stroke="#003800" stroke-width="0.5"/>
+            <text x="65" y="23" fill="#00cc44" font-size="6" font-family="monospace" text-anchor="middle">ProjectX API Access</text>
+            <text x="65" y="32" fill="#00aa33" font-size="5.5" font-family="monospace" text-anchor="middle">$29/mo  →  $14.50/mo</text>
+            <rect x="14" y="35" width="60" height="8" rx="1" fill="#000a00" stroke="#003300" stroke-width="0.5"/>
+            <text x="18" y="41.5" fill="#00cc44" font-size="5.5" font-family="monospace">topstep</text>
+            <rect x="78" y="35" width="38" height="8" rx="1" fill="#002800" stroke="#00ff44" stroke-width="0.5"/>
+            <text x="97" y="41.5" fill="#00ff44" font-size="5.5" font-family="monospace" text-anchor="middle">APPLY</text>
+            <rect x="14" y="46" width="102" height="8" rx="1" fill="#003000" stroke="#00ff44" stroke-width="0.5"/>
+            <text x="65" y="52" fill="#00ff44" font-size="5.5" font-family="monospace" text-anchor="middle">SUBSCRIBE — 50% OFF</text>
+          </svg>
+        </div>
+
+        <!-- Step 5 -->
+        <div class="guide-step">
+          <div class="guide-num">05</div>
+          <div class="guide-content">
+            <div class="guide-title">GENERATE YOUR API KEY IN TOPSTEPX</div>
+            <div class="guide-desc">Back in TopstepX — <strong style="color:var(--green-lo)">Launch TopstepX → Settings (left side) → API tab (top right)</strong>. Click <strong style="color:var(--green-lo)">Add API Key</strong>, give it any name, copy the key, and paste it into the field on the left.</div>
+          </div>
+          <svg class="guide-art" width="130" height="62" viewBox="0 0 130 62" xmlns="http://www.w3.org/2000/svg">
+            <rect width="130" height="62" fill="#000800"/>
+            <rect x="0" y="0" width="130" height="12" fill="#001200"/>
+            <rect x="38" y="0" width="26" height="12" fill="#002800"/>
+            <text x="51" y="8.5" fill="#00ff44" font-size="5.5" font-family="monospace" text-anchor="middle">API</text>
+            <text x="8" y="8.5" fill="#003800" font-size="5.5" font-family="monospace">PROFILE</text>
+            <text x="72" y="8.5" fill="#003800" font-size="5.5" font-family="monospace">TRADING</text>
+            <text x="8" y="22" fill="#005500" font-size="5" font-family="monospace">PROJECTX LINKING</text>
+            <rect x="8" y="24" width="114" height="10" rx="1" fill="#001500" stroke="#003300" stroke-width="0.5"/>
+            <text x="13" y="31" fill="#00aa44" font-size="5" font-family="monospace">✓ Linked  |  Subscription: Active</text>
+            <text x="8" y="44" fill="#005500" font-size="5" font-family="monospace">API KEYS</text>
+            <rect x="8" y="46" width="114" height="9" rx="1" fill="#001200" stroke="#002800" stroke-width="0.5"/>
+            <text x="13" y="53" fill="#003800" font-size="5" font-family="monospace">████████████████████████████</text>
+            <rect x="86" y="47" width="30" height="7" rx="1" fill="#002800" stroke="#004400" stroke-width="0.5"/>
+            <text x="101" y="52.5" fill="#006600" font-size="5" font-family="monospace" text-anchor="middle">COPY ⎘</text>
+            <rect x="8" y="57" width="114" height="4" rx="1" fill="#002000" stroke="#00ff44" stroke-width="0.5"/>
+            <text x="65" y="60.5" fill="#00ff44" font-size="4.5" font-family="monospace" text-anchor="middle">+ ADD API KEY</text>
+          </svg>
+        </div>
+
+      </div>
+    </div>
+    <!-- ── End API Key Guide ───────────────────────────────────────────────── -->
+
+    <div style="margin:14px 0 8px" class="card-title">SELECT ACCOUNTS (UP TO 5)</div>
+    <p style="font-size:11px;color:var(--green-lo);margin-bottom:10px;line-height:1.6">
+      Click FETCH to load your accounts, then enter the last 4 digits of each account you want to trade.
     </p>
 
-    <div id="acct-entries"></div>
-    <button class="add-acct-btn" id="add-acct-btn">+ ADD ACCOUNT</button>
+    <div class="fetch-bar">
+      <button class="btn-fetch" id="btn-fetch-accts">FETCH ACCOUNTS</button>
+      <span class="fetch-status" id="fetch-status">Enter API key above first</span>
+    </div>
+
+    <div id="acct-slots"></div>
 
     <div class="error-msg" id="acct-error"></div>
 
@@ -349,7 +849,7 @@
     <div class="error-msg" id="confirm-error"></div>
 
     <div class="setup-nav">
-      <button class="btn-back" onclick="goStep(2)">← BACK</button>
+      <button class="btn-back" id="back-3" onclick="goStep(setupData.brokerType==='alpaca'?1:2)">← BACK</button>
       <button class="btn-next" id="next-3">LAUNCH BOT →</button>
     </div>
   </div>
@@ -361,7 +861,7 @@
 /* ── Setup wizard logic ──────────────────────────────────────────────────── */
 let currentStep = 0;
 let licenseVerified = false;
-const setupData = { license: "", username: "", symbol: "ES", accounts: [], ntfy: "" };
+const setupData = { license: "", brokerType: "topstepx", username: "", symbol: "ES", alpacaKey: "", alpacaSecret: "", accounts: [], ntfy: "" };
 
 /* -- Step navigation -- */
 function goStep(n) {
@@ -369,6 +869,8 @@ function goStep(n) {
   currentStep = n;
   document.getElementById(`step-${currentStep}`).classList.add("active");
   updatePips();
+  // Auto-open the API key guide when reaching the accounts step
+  if (n === 2) toggleGuidePanel(true);
 }
 
 function updatePips() {
@@ -394,8 +896,8 @@ function clearError(id) {
 
 /* -- License step -- */
 document.getElementById("btn-verify-lic").addEventListener("click", async () => {
-  const key = document.getElementById("lic-key").value.trim();
-  if (!key) { showError("lic-error", "Enter a license key."); return; }
+  const email = document.getElementById("lic-key").value.trim().toLowerCase();
+  if (!email || !email.includes("@")) { showError("lic-error", "Enter your subscription email."); return; }
   clearError("lic-error");
 
   const btn = document.getElementById("btn-verify-lic");
@@ -405,7 +907,7 @@ document.getElementById("btn-verify-lic").addEventListener("click", async () => 
   try {
     let result;
     if (window.bot) {
-      result = await window.bot.verifyLicense(key);
+      result = await window.bot.verifyLicense(email);
     } else {
       // In browser preview: simulate
       result = { valid: true, email: "preview@local" };
@@ -413,14 +915,28 @@ document.getElementById("btn-verify-lic").addEventListener("click", async () => 
 
     if (result.valid) {
       licenseVerified = true;
-      setupData.license = key;
+      setupData.license = email;
       document.getElementById("verified-badge").classList.add("show");
       clearError("lic-error");
+
+      const $sd = document.getElementById("sub-days");
+      if (result.isFreeLoader) {
+        $sd.textContent  = "∞ days — Limited Edition: Free Loader 🎭";
+        $sd.style.color  = "var(--green-hi)";
+        $sd.style.display = "block";
+      } else if (result.daysLeft != null) {
+        const label = result.isTrial
+          ? `${result.daysLeft} day${result.daysLeft !== 1 ? "s" : ""} left in your free trial`
+          : `${result.daysLeft} day${result.daysLeft !== 1 ? "s" : ""} left in billing period`;
+        $sd.textContent   = label;
+        $sd.style.color   = result.daysLeft <= 3 ? "#ff4444" : result.daysLeft <= 7 ? "#ffaa00" : "var(--text-dim)";
+        $sd.style.display = "block";
+      }
     } else {
-      showError("lic-error", result.reason || "License invalid.");
+      showError("lic-error", result.reason || "Subscription not found.");
     }
   } catch (e) {
-    showError("lic-error", "Could not reach license server.");
+    showError("lic-error", `Verification error: ${e.message || e}`);
   } finally {
     btn.textContent = "VERIFY";
     btn.disabled = false;
@@ -429,78 +945,269 @@ document.getElementById("btn-verify-lic").addEventListener("click", async () => 
 
 document.getElementById("next-0").addEventListener("click", () => {
   if (!licenseVerified) {
-    showError("lic-error", "Verify your license key first.");
+    showError("lic-error", "Verify your subscription email first.");
     return;
   }
   clearError("lic-error");
   goStep(1);
 });
 
+/* -- Broker type toggle -- */
+let _brokerType = "topstepx";
+
+function setBrokerType(type) {
+  _brokerType = type;
+  const tsxBtn  = document.getElementById("broker-tsx-btn");
+  const alpBtn  = document.getElementById("broker-alp-btn");
+  const tsxFlds = document.getElementById("broker-tsx-fields");
+  const alpFlds = document.getElementById("broker-alp-fields");
+
+  const activeStyle   = "flex:1;background:rgba(0,40,0,0.8);border:1px solid var(--green-lo);color:var(--green-hi);font-family:var(--font);font-size:10px;letter-spacing:0.12em;padding:7px 4px;cursor:pointer";
+  const inactiveStyle = "flex:1;background:none;border:1px solid var(--panel-bdr);color:var(--text-dim);font-family:var(--font);font-size:10px;letter-spacing:0.12em;padding:7px 4px;cursor:pointer";
+
+  if (type === "topstepx") {
+    tsxBtn.style.cssText  = activeStyle;
+    alpBtn.style.cssText  = inactiveStyle;
+    tsxFlds.style.display = "";
+    alpFlds.style.display = "none";
+  } else {
+    alpBtn.style.cssText  = activeStyle;
+    tsxBtn.style.cssText  = inactiveStyle;
+    alpFlds.style.display = "";
+    tsxFlds.style.display = "none";
+  }
+}
+
 /* -- Broker step -- */
 document.getElementById("next-1").addEventListener("click", () => {
-  const user   = document.getElementById("broker-user").value.trim();
-  const symbol = document.getElementById("broker-symbol").value.trim() || "ES";
-
-  if (!user) { showError("broker-error", "Enter your TopstepX username."); return; }
   clearError("broker-error");
 
-  setupData.username = user;
-  setupData.symbol   = symbol;
-  ensureOneAccount();
+  if (_brokerType === "alpaca") {
+    const key    = document.getElementById("alpaca-key").value.trim();
+    const secret = document.getElementById("alpaca-secret").value.trim();
+    if (!key)    { showError("broker-error", "Enter your Alpaca API Key ID."); return; }
+    if (!secret) { showError("broker-error", "Enter your Alpaca Secret Key."); return; }
+    if (!key.startsWith("PK")) { showError("broker-error", 'Key ID should start with "PK" — check you\'re using the Paper Trading keys.'); return; }
+    setupData.brokerType   = "alpaca";
+    setupData.alpacaKey    = key;
+    setupData.alpacaSecret = secret;
+    buildSummary();
+    goStep(3);  // skip accounts step — Alpaca uses its own paper account
+    return;
+  }
+
+  const user   = document.getElementById("broker-user").value.trim();
+  const symbol = document.getElementById("broker-symbol").value.trim() || "ES";
+  if (!user) { showError("broker-error", "Enter your TopstepX username."); return; }
+
+  setupData.brokerType = "topstepx";
+  setupData.username   = user;
+  setupData.symbol     = symbol;
   goStep(2);
 });
 
+
 /* -- Accounts step -- */
-function ensureOneAccount() {
-  if (document.querySelectorAll(".acct-entry").length === 0) addAccount();
+const STRAT_LIST = [
+  ["DONCH15_L",    "Donchian 15 Long"],
+  ["VOLBO_L",      "Volume BO Long"],
+  ["VOLBO_S",      "Volume BO Short"],
+  ["EMA21_PULL_L", "EMA21 Pullback Long"],
+  ["BO10_S",       "Donchian 10 Short"],
+  ["3BAR_BEAR_S",  "3-Bar Reversal Short"],
+  ["KELT_L",       "Keltner Bounce Long"],
+];
+
+let _txAccounts = [];  // fetched from TopstepX API
+
+function matchAccount(digits) {
+  if (!digits || digits.length !== 4) return null;
+  return _txAccounts.find(a => a.last4 === digits || a.nameLast4 === digits) ?? null;
 }
 
-let acctCount = 0;
+function updateSlotStatus(slot, acct) {
+  const statusEl = slot.querySelector(".slot-status");
+  const nameEl   = slot.querySelector(".slot-acct-name");
+  const badge    = slot.querySelector(".type-badge");
 
-function addAccount() {
-  if (acctCount >= 10) return;
-  acctCount++;
-  const idx = acctCount;
-  const div = document.createElement("div");
-  div.className = "acct-entry";
-  div.dataset.idx = idx;
-  div.innerHTML = `
-    <div class="acct-num">ACCOUNT ${idx}</div>
-    <div class="form-group">
-      <label>NAME / LABEL</label>
-      <input type="text" placeholder="Combine 1" class="acct-name-input">
-    </div>
-    <div class="form-group">
-      <label>API KEY</label>
-      <input type="password" placeholder="ProjectX API key" class="acct-key-input" spellcheck="false">
-    </div>
-  `;
-  document.getElementById("acct-entries").appendChild(div);
+  slot._account = acct;
+
+  if (!acct) {
+    nameEl.textContent   = "";
+    badge.textContent    = "";
+    badge.className      = "type-badge";
+    statusEl.textContent = digits(slot).length === 4 ? "⚠ NOT FOUND" : "enter last 4 digits";
+    statusEl.className   = digits(slot).length === 4 ? "slot-status err" : "slot-status pending";
+    slot.classList.remove("connected");
+  } else {
+    nameEl.textContent   = acct.name;
+    badge.textContent    = acct.isFunded ? "FUNDED" : "COMBINE";
+    badge.className      = "type-badge " + (acct.isFunded ? "funded" : "combine");
+    statusEl.textContent = "✓ CONNECTED";
+    statusEl.className   = "slot-status ok";
+    slot.classList.add("connected");
+  }
 }
 
-document.getElementById("add-acct-btn").addEventListener("click", () => {
-  if (acctCount >= 10) { showError("acct-error", "Maximum 10 accounts."); return; }
-  addAccount();
+function digits(slot) {
+  return (slot.querySelector(".slot-digits")?.value ?? "").trim();
+}
+
+function buildSlots() {
+  const container = document.getElementById("acct-slots");
+  container.innerHTML = "";
+
+  for (let i = 0; i < 5; i++) {
+    const enabled = i === 0;
+    const slot = document.createElement("div");
+    slot.className = "acct-slot" + (enabled ? " enabled" : "");
+    slot._account  = null;
+
+    const stratRows = STRAT_LIST.map(([id, label]) => `
+      <label class="strat-row checked">
+        <input type="checkbox" class="strat-chk" data-id="${id}" checked>
+        ${label}
+      </label>`).join("");
+
+    slot.innerHTML = `
+      <div class="slot-main-row">
+        <input type="checkbox" class="slot-chk" ${enabled ? "checked" : ""}>
+        <input type="text" class="slot-digits" maxlength="4" placeholder="0000" ${enabled ? "" : "disabled"}>
+        <div class="slot-info">
+          <div style="display:flex;align-items:center;gap:0">
+            <span class="slot-acct-name"></span>
+            <span class="type-badge"></span>
+          </div>
+          <span class="slot-status pending">enter last 4 digits</span>
+        </div>
+        <button type="button" class="strat-toggle">STRATS</button>
+      </div>
+      <div class="strat-panel closed">${stratRows}</div>
+    `;
+
+    const chk    = slot.querySelector(".slot-chk");
+    const dig    = slot.querySelector(".slot-digits");
+    const toggle = slot.querySelector(".strat-toggle");
+    const panel  = slot.querySelector(".strat-panel");
+
+    chk.addEventListener("change", () => {
+      const on = chk.checked;
+      dig.disabled = !on;
+      slot.classList.toggle("enabled", on);
+      if (!on) {
+        slot.classList.remove("connected");
+        panel.classList.add("closed");
+        toggle.classList.remove("open");
+        slot._account = null;
+        const statusEl = slot.querySelector(".slot-status");
+        statusEl.textContent = "enter last 4 digits";
+        statusEl.className   = "slot-status pending";
+        slot.querySelector(".slot-acct-name").textContent = "";
+        slot.querySelector(".type-badge").textContent = "";
+        slot.querySelector(".type-badge").className = "type-badge";
+      }
+    });
+
+    dig.addEventListener("input", () => {
+      const val = dig.value.replace(/\D/g, "").slice(0, 4);
+      dig.value = val;
+      updateSlotStatus(slot, val.length === 4 ? matchAccount(val) : null);
+    });
+
+    toggle.addEventListener("click", () => {
+      const isOpen = !panel.classList.contains("closed");
+      panel.classList.toggle("closed", isOpen);
+      toggle.classList.toggle("open", !isOpen);
+      toggle.textContent = isOpen ? "STRATS" : "STRATS ▴";
+    });
+
+    slot.querySelectorAll(".strat-row").forEach(row => {
+      const chkBox = row.querySelector(".strat-chk");
+      chkBox.addEventListener("change", () => row.classList.toggle("checked", chkBox.checked));
+    });
+
+    container.appendChild(slot);
+  }
+}
+
+buildSlots();
+
+document.getElementById("btn-fetch-accts").addEventListener("click", async () => {
+  const apiKey = document.getElementById("shared-api-key").value.trim();
+  if (!apiKey) { showError("acct-error", "Enter your API key first."); return; }
   clearError("acct-error");
+
+  const btn    = document.getElementById("btn-fetch-accts");
+  const status = document.getElementById("fetch-status");
+  btn.disabled    = true;
+  btn.textContent = "FETCHING...";
+  status.textContent = "";
+  status.className   = "fetch-status";
+
+  try {
+    let result;
+    if (window.bot) {
+      result = await window.bot.searchAccounts({ username: setupData.username, apiKey });
+    } else {
+      result = { ok: true, accounts: [
+        { id: "25617161", name: "EXPRESS-V2-DLL-604182-95907059", isFunded: true,  canTrade: true,  last4: "7161", nameLast4: "7059" },
+        { id: "25039916", name: "100KTC-V2-DLL-604182-97392078",  isFunded: false, canTrade: true,  last4: "9916", nameLast4: "2078" },
+      ]};
+    }
+
+    if (!result.ok) throw new Error(result.error);
+
+    _txAccounts = result.accounts;
+    status.textContent = `${_txAccounts.length} account${_txAccounts.length !== 1 ? "s" : ""} found`;
+    status.className   = "fetch-status ok";
+
+    // Re-run match on any slots that already have digits
+    document.querySelectorAll(".acct-slot").forEach(slot => {
+      const val = slot.querySelector(".slot-digits").value;
+      if (val.length === 4) updateSlotStatus(slot, matchAccount(val));
+    });
+
+  } catch (e) {
+    status.textContent = `Error: ${e.message}`;
+    status.className   = "fetch-status err";
+  } finally {
+    btn.disabled    = false;
+    btn.textContent = "FETCH ACCOUNTS";
+  }
 });
 
 document.getElementById("next-2").addEventListener("click", () => {
-  const entries = document.querySelectorAll(".acct-entry");
-  const accounts = [];
+  const apiKey = document.getElementById("shared-api-key").value.trim();
+  if (!apiKey) { showError("acct-error", "Enter your TopstepX API key."); return; }
 
-  for (const entry of entries) {
-    const name = entry.querySelector(".acct-name-input").value.trim();
-    const key  = entry.querySelector(".acct-key-input").value.trim();
-    if (!name || !key) {
-      showError("acct-error", `Fill in name and API key for all accounts.`);
+  const slots  = document.querySelectorAll(".acct-slot");
+  const funded = [], combines = [];
+
+  for (const slot of slots) {
+    const chk = slot.querySelector(".slot-chk");
+    if (!chk.checked) continue;
+    if (!slot._account) {
+      showError("acct-error", "One or more enabled slots has no matched account. Enter valid last-4 digits or uncheck the slot.");
       return;
     }
-    accounts.push({ name, apiKey: key });
+
+    const strategies = {};
+    slot.querySelectorAll(".strat-chk").forEach(c => { strategies[c.dataset.id] = c.checked; });
+
+    const entry = {
+      id:         slot._account.id,
+      name:       slot._account.name,
+      type:       slot._account.isFunded ? "Funded" : "Combine",
+      strategies,
+    };
+    (slot._account.isFunded ? funded : combines).push(entry);
   }
 
-  if (accounts.length === 0) { showError("acct-error", "Add at least one account."); return; }
+  const accounts = [...funded, ...combines];
+  if (accounts.length === 0) { showError("acct-error", "Enable at least one account."); return; }
   clearError("acct-error");
 
+  setupData.apiKey   = apiKey;
   setupData.accounts = accounts;
   buildSummary();
   goStep(3);
@@ -509,24 +1216,40 @@ document.getElementById("next-2").addEventListener("click", () => {
 /* -- Notifications + confirm step -- */
 function buildSummary() {
   const tbl = document.getElementById("summary-table");
-  tbl.innerHTML = `
-    <tr><td>License</td><td>${setupData.license.slice(0,8)}…</td></tr>
-    <tr><td>Username</td><td>${setupData.username}</td></tr>
-    <tr><td>Symbol</td><td>${setupData.symbol}</td></tr>
-    <tr><td>Accounts</td><td>${setupData.accounts.map(a => a.name).join(", ")}</td></tr>
-  `;
+  if (setupData.brokerType === "alpaca") {
+    const maskedKey    = setupData.alpacaKey    ? setupData.alpacaKey.slice(0, 6) + "••••••" + setupData.alpacaKey.slice(-4) : "—";
+    const maskedSecret = setupData.alpacaSecret ? "••••••••••••••••" + setupData.alpacaSecret.slice(-4) : "—";
+    tbl.innerHTML = `
+      <tr><td>Email</td><td>${setupData.license}</td></tr>
+      <tr><td>Broker</td><td>Alpaca Paper Trading</td></tr>
+      <tr><td>Instrument</td><td>MES (Micro E-mini S&amp;P 500)</td></tr>
+      <tr><td>API Key ID</td><td>${maskedKey}</td></tr>
+      <tr><td>Secret Key</td><td>${maskedSecret}</td></tr>
+    `;
+  } else {
+    const maskedKey = setupData.apiKey
+      ? setupData.apiKey.slice(0, 6) + "••••••••" + setupData.apiKey.slice(-4)
+      : "—";
+    tbl.innerHTML = `
+      <tr><td>Email</td><td>${setupData.license}</td></tr>
+      <tr><td>Username</td><td>${setupData.username}</td></tr>
+      <tr><td>Symbol</td><td>${setupData.symbol}</td></tr>
+      <tr><td>API Key</td><td>${maskedKey}</td></tr>
+      <tr><td>Accounts</td><td>${setupData.accounts.map(a => `${a.name} (${a.type})`).join(", ")}</td></tr>
+    `;
+  }
 }
 
 document.getElementById("next-3").addEventListener("click", async () => {
   setupData.ntfy = document.getElementById("ntfy-channel").value.trim();
 
+  const broker = setupData.brokerType === "alpaca"
+    ? { type: "alpaca", alpacaKey: setupData.alpacaKey, alpacaSecret: setupData.alpacaSecret }
+    : { type: "topstepx", username: setupData.username, symbol: setupData.symbol, apiKey: setupData.apiKey, accounts: setupData.accounts };
+
   const config = {
-    license:  { key: setupData.license },
-    broker: {
-      username: setupData.username,
-      symbol:   setupData.symbol,
-      accounts: setupData.accounts,
-    },
+    license:  { email: setupData.license },
+    broker,
     notifications: {
       ntfyChannel: setupData.ntfy || null,
     },
@@ -555,6 +1278,177 @@ document.getElementById("next-3").addEventListener("click", async () => {
     btn.disabled = false;
   }
 });
+</script>
+
+<!-- ── API Key Guide side panel ───────────────────────────────────────────── -->
+<div id="guide-panel">
+  <div class="guide-panel-hdr">
+    <span>HOW TO GET YOUR API KEY</span>
+    <button class="guide-panel-close" id="btn-close-panel">✕</button>
+  </div>
+  <div class="guide-panel-body">
+
+    <div class="guide-step">
+      <div class="guide-num">01</div>
+      <div class="guide-content">
+        <div class="guide-title">CREATE YOUR TOPSTEPX ACCOUNT</div>
+        <div class="guide-desc">Sign up at topstepx.com with your email address and verify your email when prompted.</div>
+        <span class="guide-link" onclick="(window.bot?.openExternal ?? window.open.bind(window))('https://www.topstepx.com')">topstepx.com →</span>
+      </div>
+      <svg class="guide-art" viewBox="0 0 130 62" xmlns="http://www.w3.org/2000/svg">
+        <rect width="130" height="62" fill="#000800"/>
+        <rect x="0" y="0" width="130" height="13" fill="#001200"/>
+        <circle cx="8" cy="6.5" r="3" fill="#001f00"/><circle cx="18" cy="6.5" r="3" fill="#001f00"/><circle cx="28" cy="6.5" r="3" fill="#001f00"/>
+        <rect x="38" y="2" width="88" height="9" rx="1.5" fill="#000a00" stroke="#002800" stroke-width="0.5"/>
+        <text x="82" y="9" fill="#004400" font-size="5.5" font-family="monospace" text-anchor="middle">topstepx.com/signup</text>
+        <text x="65" y="25" fill="#00cc44" font-size="6.5" font-family="monospace" text-anchor="middle">CREATE ACCOUNT</text>
+        <rect x="10" y="29" width="110" height="9" rx="1" fill="#001500" stroke="#002800" stroke-width="0.5"/>
+        <text x="15" y="36" fill="#003800" font-size="5" font-family="monospace">EMAIL  ████████████████</text>
+        <rect x="10" y="41" width="110" height="9" rx="1" fill="#001500" stroke="#002800" stroke-width="0.5"/>
+        <text x="15" y="48" fill="#003800" font-size="5" font-family="monospace">PASSWORD  ██████████</text>
+        <rect x="30" y="53" width="70" height="8" rx="1" fill="#002800" stroke="#00aa33" stroke-width="0.5"/>
+        <text x="65" y="59.5" fill="#00ff44" font-size="5.5" font-family="monospace" text-anchor="middle">SIGN UP</text>
+      </svg>
+    </div>
+
+    <div class="guide-step">
+      <div class="guide-num">02</div>
+      <div class="guide-content">
+        <div class="guide-title">PURCHASE A TRADING COMBINE</div>
+        <div class="guide-desc">From your TopstepX dashboard, select a Combine or Funded account size and complete checkout.</div>
+        <span class="guide-link" onclick="(window.bot?.openExternal ?? window.open.bind(window))('https://www.topstepx.com/trading-combines/')">View account options →</span>
+      </div>
+      <svg class="guide-art" viewBox="0 0 130 62" xmlns="http://www.w3.org/2000/svg">
+        <rect width="130" height="62" fill="#000800"/>
+        <text x="65" y="10" fill="#005500" font-size="5.5" font-family="monospace" text-anchor="middle">SELECT ACCOUNT SIZE</text>
+        <rect x="4" y="14" width="56" height="44" rx="2" fill="#001200" stroke="#002800" stroke-width="0.5"/>
+        <text x="32" y="28" fill="#00aa33" font-size="9" font-family="monospace" text-anchor="middle">50K</text>
+        <text x="32" y="38" fill="#004400" font-size="5" font-family="monospace" text-anchor="middle">COMBINE</text>
+        <rect x="9" y="43" width="46" height="8" rx="1" fill="#001f00" stroke="#003300" stroke-width="0.5"/>
+        <text x="32" y="49" fill="#005500" font-size="5" font-family="monospace" text-anchor="middle">SELECT</text>
+        <rect x="70" y="14" width="56" height="44" rx="2" fill="#001f00" stroke="#00cc44" stroke-width="1"/>
+        <text x="98" y="28" fill="#00ff88" font-size="9" font-family="monospace" text-anchor="middle">100K</text>
+        <text x="98" y="38" fill="#00cc44" font-size="5" font-family="monospace" text-anchor="middle">COMBINE</text>
+        <rect x="75" y="43" width="46" height="8" rx="1" fill="#003300" stroke="#00ff44" stroke-width="0.5"/>
+        <text x="98" y="49" fill="#00ff44" font-size="5" font-family="monospace" text-anchor="middle">SELECT ✓</text>
+      </svg>
+    </div>
+
+    <div class="guide-step">
+      <div class="guide-num">03</div>
+      <div class="guide-content">
+        <div class="guide-title">LINK PROJECTX IN TOPSTEPX SETTINGS</div>
+        <div class="guide-desc">In TopstepX open <strong style="color:var(--green-lo)">Settings ⚙ → API tab</strong> and click <strong style="color:var(--green-lo)">Link</strong> under ProjectX Linking. This creates your free ProjectX Dashboard account at dashboard.projectx.com.</div>
+        <span class="guide-link" onclick="(window.bot?.openExternal ?? window.open.bind(window))('https://dashboard.projectx.com')">dashboard.projectx.com →</span>
+      </div>
+      <svg class="guide-art" viewBox="0 0 130 62" xmlns="http://www.w3.org/2000/svg">
+        <rect width="130" height="62" fill="#000800"/>
+        <rect x="0" y="0" width="130" height="12" fill="#001200"/>
+        <text x="8"  y="8.5" fill="#003800" font-size="5.5" font-family="monospace">PROFILE</text>
+        <rect x="38" y="0" width="26" height="12" fill="#002800"/>
+        <text x="51" y="8.5" fill="#00ff44" font-size="5.5" font-family="monospace" text-anchor="middle">API</text>
+        <text x="72" y="8.5" fill="#003800" font-size="5.5" font-family="monospace">TRADING</text>
+        <text x="104" y="8.5" fill="#003800" font-size="5.5" font-family="monospace">BILLING</text>
+        <text x="8" y="21" fill="#005500" font-size="5" font-family="monospace">PROJECTX LINKING</text>
+        <rect x="8" y="23" width="114" height="15" rx="1" fill="#001500" stroke="#003300" stroke-width="0.5"/>
+        <text x="13" y="33" fill="#005500" font-size="5" font-family="monospace">Status: Not linked</text>
+        <rect x="88" y="25" width="28" height="11" rx="1" fill="#002800" stroke="#00ff44" stroke-width="0.5"/>
+        <text x="102" y="33" fill="#00ff44" font-size="6" font-family="monospace" text-anchor="middle">LINK</text>
+        <text x="8" y="50" fill="#005500" font-size="5" font-family="monospace">API KEYS</text>
+        <rect x="8" y="52" width="114" height="8" rx="1" fill="#001200" stroke="#002200" stroke-width="0.5"/>
+        <text x="65" y="58" fill="#003300" font-size="5" font-family="monospace" text-anchor="middle">— link ProjectX first —</text>
+      </svg>
+    </div>
+
+    <div class="guide-step">
+      <div class="guide-num">04</div>
+      <div class="guide-content">
+        <div class="guide-title">SUBSCRIBE TO API ACCESS ($14.50/MO)</div>
+        <div class="guide-desc">On the ProjectX Dashboard go to <strong style="color:var(--green-lo)">Subscriptions → ProjectX API Access</strong>. Use code <strong style="color:var(--green-hi)">topstep</strong> at checkout for a permanent 50% discount — $14.50/mo instead of $29.</div>
+        <span class="guide-link" onclick="(window.bot?.openExternal ?? window.open.bind(window))('https://dashboard.projectx.com')">dashboard.projectx.com →</span>
+      </div>
+      <svg class="guide-art" viewBox="0 0 130 62" xmlns="http://www.w3.org/2000/svg">
+        <rect width="130" height="62" fill="#000800"/>
+        <rect x="0" y="0" width="130" height="11" fill="#001200"/>
+        <rect x="4" y="2" width="122" height="7" rx="1" fill="#000a00" stroke="#002200" stroke-width="0.5"/>
+        <text x="65" y="7.5" fill="#004400" font-size="5" font-family="monospace" text-anchor="middle">dashboard.projectx.com/subscriptions</text>
+        <rect x="8" y="13" width="114" height="44" rx="2" fill="#001500" stroke="#003800" stroke-width="0.5"/>
+        <text x="65" y="23" fill="#00cc44" font-size="6" font-family="monospace" text-anchor="middle">ProjectX API Access</text>
+        <text x="65" y="32" fill="#00aa33" font-size="5.5" font-family="monospace" text-anchor="middle">$29/mo  →  $14.50/mo</text>
+        <rect x="14" y="35" width="60" height="8" rx="1" fill="#000a00" stroke="#003300" stroke-width="0.5"/>
+        <text x="18" y="41.5" fill="#00cc44" font-size="5.5" font-family="monospace">topstep</text>
+        <rect x="78" y="35" width="38" height="8" rx="1" fill="#002800" stroke="#00ff44" stroke-width="0.5"/>
+        <text x="97" y="41.5" fill="#00ff44" font-size="5.5" font-family="monospace" text-anchor="middle">APPLY</text>
+        <rect x="14" y="46" width="102" height="8" rx="1" fill="#003000" stroke="#00ff44" stroke-width="0.5"/>
+        <text x="65" y="52" fill="#00ff44" font-size="5.5" font-family="monospace" text-anchor="middle">SUBSCRIBE — 50% OFF</text>
+      </svg>
+    </div>
+
+    <div class="guide-step">
+      <div class="guide-num">05</div>
+      <div class="guide-content">
+        <div class="guide-title">GENERATE YOUR API KEY IN TOPSTEPX</div>
+        <div class="guide-desc">Back in TopstepX — <strong style="color:var(--green-lo)">Launch TopstepX → Settings (left side) → API tab (top right)</strong>. Click <strong style="color:var(--green-lo)">Add API Key</strong>, give it any name, copy the key, and paste it into the field on the left.</div>
+      </div>
+      <svg class="guide-art" viewBox="0 0 130 62" xmlns="http://www.w3.org/2000/svg">
+        <rect width="130" height="62" fill="#000800"/>
+        <rect x="0" y="0" width="130" height="12" fill="#001200"/>
+        <rect x="38" y="0" width="26" height="12" fill="#002800"/>
+        <text x="51" y="8.5" fill="#00ff44" font-size="5.5" font-family="monospace" text-anchor="middle">API</text>
+        <text x="8" y="8.5" fill="#003800" font-size="5.5" font-family="monospace">PROFILE</text>
+        <text x="72" y="8.5" fill="#003800" font-size="5.5" font-family="monospace">TRADING</text>
+        <text x="8" y="22" fill="#005500" font-size="5" font-family="monospace">PROJECTX LINKING</text>
+        <rect x="8" y="24" width="114" height="10" rx="1" fill="#001500" stroke="#003300" stroke-width="0.5"/>
+        <text x="13" y="31" fill="#00aa44" font-size="5" font-family="monospace">✓ Linked  |  Subscription: Active</text>
+        <text x="8" y="44" fill="#005500" font-size="5" font-family="monospace">API KEYS</text>
+        <rect x="8" y="46" width="114" height="9" rx="1" fill="#001200" stroke="#002800" stroke-width="0.5"/>
+        <text x="13" y="53" fill="#003800" font-size="5" font-family="monospace">████████████████████████████</text>
+        <rect x="86" y="47" width="30" height="7" rx="1" fill="#002800" stroke="#004400" stroke-width="0.5"/>
+        <text x="101" y="52.5" fill="#006600" font-size="5" font-family="monospace" text-anchor="middle">COPY ⎘</text>
+        <rect x="8" y="57" width="114" height="4" rx="1" fill="#002000" stroke="#00ff44" stroke-width="0.5"/>
+        <text x="65" y="60.5" fill="#00ff44" font-size="4.5" font-family="monospace" text-anchor="middle">+ ADD API KEY</text>
+      </svg>
+    </div>
+
+  </div>
+</div>
+
+<script>
+/* ── Guide panel (shared between ? button and inline toggle) ─────────────── */
+function toggleGuidePanel(forceOpen) {
+  const panel = document.getElementById("guide-panel");
+  const btn   = document.getElementById("btn-guide-panel");
+  const open  = forceOpen !== undefined ? forceOpen : !panel.classList.contains("open");
+  panel.classList.toggle("open", open);
+  btn.classList.toggle("active", open);
+}
+
+document.getElementById("btn-close-panel").addEventListener("click", () => toggleGuidePanel(false));
+
+// ── Auto-updater banner ────────────────────────────────────────────────────
+if (window.bot?.on) {
+  const $updateBar  = document.getElementById("update-bar");
+  const $updateText = document.getElementById("update-bar-text");
+  const $updateProg = document.getElementById("update-bar-progress");
+  const $updateFill = document.getElementById("update-bar-fill");
+  const $updateBtn  = document.getElementById("update-bar-btn");
+
+  window.bot.on("update-downloading", ({ version }) => {
+    $updateBar.hidden = false;
+    $updateText.textContent = `⬡ DOWNLOADING UPDATE v${version}…`;
+    $updateProg.hidden = false;
+  });
+
+  window.bot.on("update-progress", ({ percent }) => {
+    $updateFill.style.width = `${percent}%`;
+  });
+
+  window.bot.on("update-ready", ({ version }) => {
+    $updateText.textContent = `⬡ UPDATE v${version} READY`;
+    $updateProg.hidden = true;
+    $updateBtn.style.display = "block";
+  });
+}
 </script>
 </body>
 </html>

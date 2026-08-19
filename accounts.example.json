@@ -28,5 +28,22 @@
     "TV_USER":      "your@email.com",
     "TV_API_KEY":   "api-key-for-account-5",
     "NTFY_CHANNEL": "your-ntfy-channel-acct5"
+  },
+
+  {
+    "_comment":        "--- ALPACA PAPER TRADING (MES futures) ---",
+    "name":            "Alpaca-MES-Paper",
+    "engine_type":     "alpaca",
+    "ALPACA_KEY":      "PKxxxxxxxxxxxxxxxxxxxxxxxx",
+    "ALPACA_SECRET":   "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "ALPACA_PAPER":    "true",
+    "NTFY_CHANNEL":    "your-ntfy-channel-alpaca",
+    "MAX_CONTRACTS":   "1",
+    "STOP_MODE":       "trail",
+    "STOP_LOSS_TICKS": "13",
+    "TAKE_PROFIT_TICKS": "42",
+    "TRAIL_TICKS":     "8",
+    "DAILY_LOSS_LIMIT": "150",
+    "DAILY_PROFIT_CAP": "250"
   }
 ]

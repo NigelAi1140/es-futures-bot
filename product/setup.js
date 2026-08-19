@@ -39,9 +39,9 @@ const confirm = (q, def = "y") =>
 banner();
 console.log("  Setup Wizard\n");
 console.log("  You will need:");
-console.log("    · Your license key  (from your purchase email)");
+console.log("    · The email you used to subscribe on Gumroad");
 console.log("    · Your TopstepX username  (email address)");
-console.log("    · An API key for each account you want to trade");
+console.log("    · One API key from TopstepX — covers all your accounts");
 console.log("      → TopstepX platform → Settings → API Keys → Generate");
 blank();
 
@@ -60,10 +60,12 @@ const cfg = JSON.parse(JSON.stringify(defaults));
 
 // ── Step 1: License ───────────────────────────────────────────────────────────
 divider();
-console.log("  \x1b[1mStep 1 of 5 — License\x1b[0m");
+console.log("  \x1b[1mStep 1 of 5 — Activation\x1b[0m");
+blank();
+info("Enter the email address you used when you subscribed on Gumroad.");
 blank();
 
-cfg.license.key = await askRequired("License key");
+cfg.license.email = await askRequired("Gumroad email");
 blank();
 
 // ── Step 2: Broker username ───────────────────────────────────────────────────
@@ -80,33 +82,44 @@ blank();
 divider();
 console.log("  \x1b[1mStep 3 of 5 — Accounts\x1b[0m");
 blank();
-info("Each TopstepX combine account has its own API key.");
-info("You can add up to 10 accounts. Press Enter with no key to stop adding.");
+info("One API key covers all your accounts (up to 5).");
+info("TopstepX allows Funded accounts and Combine accounts.");
+info("Funded accounts are always placed first.");
+blank();
+
+cfg.broker.apiKey = await askRequired("TopstepX API key");
 blank();
 
 cfg.broker.accounts = [];
 let accNum = 1;
 
-while (accNum <= 10) {
-  const label_  = `Account-${accNum}`;
-  const existing_ = existing.broker?.accounts?.[accNum - 1];
-  const prompt   = accNum === 1
-    ? `API key for ${label_}`
-    : `API key for ${label_} (or press Enter to finish)`;
+while (accNum <= 5) {
+  const existingAcc = existing.broker?.accounts?.[accNum - 1];
+  const defaultName = existingAcc?.name ?? (accNum === 1 ? "Funded 1" : `Combine ${accNum - 1}`);
+  const defaultType = existingAcc?.type ?? (accNum === 1 ? "Funded" : "Combine");
 
-  const key = accNum === 1
-    ? await askRequired(prompt)
+  const prompt = accNum === 1
+    ? `Account ${accNum} name`
+    : `Account ${accNum} name (or press Enter to stop adding)`;
+
+  const name = accNum === 1
+    ? await ask(prompt, defaultName)
     : await ask(prompt, "");
 
-  if (!key && accNum > 1) break;
+  if (!name && accNum > 1) break;
 
-  const name = await ask(`Name for this account`, existing_?.name ?? label_);
-  cfg.broker.accounts.push({ name, apiKey: key });
+  const typeAns = await ask(`  Type for "${name || defaultName}" — Funded or Combine`, defaultType);
+  const type = typeAns.toLowerCase().startsWith("f") ? "Funded" : "Combine";
+
+  cfg.broker.accounts.push({ name: name || defaultName, type });
   blank();
-  ok(`Added: ${name}`);
+  ok(`Added: ${name || defaultName} (${type})`);
   blank();
   accNum++;
 }
+
+// Sort: Funded first, then Combine
+cfg.broker.accounts.sort((a, b) => (a.type === "Funded" ? -1 : 1) - (b.type === "Funded" ? -1 : 1));
 
 // ── Step 4: Trading settings ──────────────────────────────────────────────────
 divider();
@@ -173,9 +186,10 @@ blank();
 
 console.log("  \x1b[1mSummary\x1b[0m");
 blank();
-label("License:",          cfg.license.key.slice(0, 8) + "••••••••");
+label("Subscription email:", cfg.license.email);
 label("Username:",         cfg.broker.username);
-label("Accounts:",         cfg.broker.accounts.map(a => a.name).join(", "));
+label("API key:",          cfg.broker.apiKey.slice(0, 6) + "••••••");
+label("Accounts:",         cfg.broker.accounts.map(a => `${a.name} (${a.type})`).join(", "));
 label("Contracts:",        cfg.trading.contracts);
 label("Stop / TP:",        `${cfg.trading.stopLossTicks}t / ${cfg.trading.takeProfitTicks}t`);
 label("Daily loss limit:", `$${cfg.trading.dailyLossLimit}`);

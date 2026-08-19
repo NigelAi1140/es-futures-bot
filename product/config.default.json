@@ -1,35 +1,57 @@
 {
   "license": {
-    "key": ""
+    "email": ""
   },
 
   "broker": {
     "type": "topstepx",
     "username": "",
     "symbol": "ES",
+    "apiKey": "",
     "accounts": [
-      { "name": "Account-1", "apiKey": "" }
+      {
+        "name": "Account 1",
+        "type": "Funded",
+        "strategies": {
+          "DONCH15_L":    true,
+          "VOLBO_L":      true,
+          "VOLBO_S":      true,
+          "EMA21_PULL_L": true,
+          "BO10_S":       true,
+          "3BAR_BEAR_S":  true,
+          "KELT_L":       true
+        }
+      }
     ]
   },
 
   "trading": {
-    "contracts":        2,
-    "stopLossTicks":   10,
-    "maxStopTicks":    20,
-    "takeProfitTicks": 40,
-    "trailTicks":       8,
-    "dailyLossLimit":  1400,
-    "dailyProfitCap":  2000,
-    "atrMinFilter":    2.0
+    "contracts":          1,
+    "stopMode":           null,
+    "stopLossTicks":     10,
+    "maxStopTicks":      20,
+    "takeProfitTicks":   48,
+    "trailTicks":         8,
+    "dailyLossLimit":   1400,
+    "dailyProfitCap":   2000,
+    "atrMinFilter":      2.0,
+    "fundedStartBalance": 0
   },
 
   "strategies": {
-    "AVWAP_L":     true,
-    "EMAPB_L":     true,
-    "EMAPB_S":     true,
-    "RSI2_L":      true,
-    "RSI2_S":      true,
-    "3BAR_BEAR_S": true
+    "DONCH15_L":    true,
+    "VOLBO_L":      true,
+    "VOLBO_S":      true,
+    "EMA21_PULL_L": true,
+    "BO10_S":       true,
+    "3BAR_BEAR_S":  true,
+    "KELT_L":       true
+  },
+
+  "regime": {
+    "auto":      true,
+    "current":   "NEUTRAL",
+    "lastCheck": null
   },
 
   "trendFilter": {

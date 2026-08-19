@@ -1,15 +1,23 @@
 {
+  "type": "module",
   "name": "claude-tradingview-mcp-trading",
   "version": "1.0.0",
   "description": "Automated trading bot — Claude + TradingView strategy + BitGet execution",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js",
-    "dev": "node bot.js"
+    "dev": "node bot.js",
+    "topstep": "node engine/topstepx-engine.js",
+    "ibkr": "node engine/v9-engine.js"
   },
   "dependencies": {
+    "@microsoft/signalr": "^10.0.0",
+    "@stoqey/ib": "^1.5.3",
+    "axios": "^1.16.1",
+    "chrome-remote-interface": "^0.34.0",
     "dotenv": "^16.4.5",
-    "node-fetch": "^3.3.2"
+    "node-fetch": "^3.3.2",
+    "ws": "^8.21.0"
   },
   "engines": {
     "node": ">=18.0.0"

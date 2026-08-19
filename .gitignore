@@ -3,6 +3,7 @@ accounts.json
 config.json
 .env
 *.key
+product/verify-worker/wrangler.toml
 
 # Node
 node_modules/
@@ -53,3 +54,4 @@ rules.json
 # Electron build output
 product/dist/
 product/out/
+product/dist-engine/

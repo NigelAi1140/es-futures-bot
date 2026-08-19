@@ -313,7 +313,9 @@ function logWeeklySummary(record) {
 // User config may specify which of the 6 active strategies to enable.
 // ENABLED_STRATEGIES=AVWAP_L,RSI2_L → disable the rest from the active set.
 // V3 signals (2026-08-02 quant rebuild — see strategies.js header for methodology)
-const ACTIVE_STRATEGIES = ["DONCH15_L","VOLBO_L","VOLBO_S","EMA21_PULL_L","BO10_S","3BAR_BEAR_S","KELT_L"];
+// NQ_BB_SQUEEZE_L/S are NQ-only signals from nq-strategies.js — must be in this list
+// or they bypass the ENABLED_STRATEGIES whitelist filter entirely.
+const ACTIVE_STRATEGIES = ["DONCH15_L","VOLBO_L","VOLBO_S","EMA21_PULL_L","BO10_S","3BAR_BEAR_S","KELT_L","NQ_BB_SQUEEZE_L","NQ_BB_SQUEEZE_S","NQ_DONCHIAN_BO_L","NQ_DONCHIAN_BO_S","NQ_VWAP_TOUCH_L","NQ_VWAP_TOUCH_S"];
 function buildUserDisabledStrategies() {
   const env = process.env.ENABLED_STRATEGIES;
   if (!env) return [];
@@ -338,9 +340,11 @@ const CFG = {
   badDayThreshold:  parseInt(process.env.BAD_DAY_THRESHOLD  || "1000"),  // prior-day loss cap for next-day 1ct mode
   dailyLossLimit:   parseInt(process.env.DAILY_LOSS_LIMIT   || "1400"),
   dailyProfitCap:  parseInt(process.env.DAILY_PROFIT_CAP  || "2000"),
-  combineTarget:   8284.80, // $3k original + $5,284.80 consistency adjustment (big single-day trade)
-  combineBalance:  58284.80,// = $50,000 + $8,284.80
-  trailDDWarn:     1800,   // warn at $1,800 drawdown (buffer from $2,000 trailing DD limit — floor $48k)
+  combineTarget:   parseFloat(process.env.COMBINE_TARGET  || "6000"),    // override per-account via accounts.json
+  accountBase:     parseFloat(process.env.ACCOUNT_BASE    || "100000"),   // starting balance — 50K or 100K combine
+  combineBalance:  parseFloat(process.env.ACCOUNT_BASE || "100000") + parseFloat(process.env.COMBINE_TARGET || "6000"),
+  trailDD:         parseFloat(process.env.TRAIL_DD        || "2500"),     // TopstepX trailing DD limit (EOD, not intraday)
+  trailDDWarn:     2000,   // warn at $2,000 drawdown (buffer from $2,500 trailing EOD DD)
   tickSize:       0.25,
   tickValue:      12.50,
 
@@ -441,9 +445,15 @@ if (CFG.contractSearch === "NQ") {
   CFG.tickValue  = 5.00;        // $5/tick vs ES $12.50
   CFG.tpTicks    = 110;         // 27.5pt TP default for NQ strategies (optimized 2026-08-01)
   CFG.stopTicks  = 40;          // 10pt fixed stop (40t @ $5 = $200/ct)
-  CFG.maxStopTicks = 60;        // allow wider bars on NQ
+  // maxStopTicks: accounts.json MAX_STOP_TICKS=40 takes priority; only fall back to 60 if unset.
+  // Hardcoding 60 here was overriding the accounts.json cap, defeating the safety fix.
+  if (!process.env.MAX_STOP_TICKS) CFG.maxStopTicks = 60;
   // Trail ticks unchanged (8t trail still applies if any NQ strategy uses trail mode)
-  CFG.pausedStrategies.length = 0;  // ES paused list irrelevant for NQ
+  // Clear ES-specific V2 tombstones from pausedStrategies, then re-apply ENABLED_STRATEGIES
+  // filter for NQ-specific signals (NQ_BB_SQUEEZE_L/S). Without the re-apply, the
+  // ENABLED_STRATEGIES whitelist has no effect on NQ accounts.
+  CFG.pausedStrategies.length = 0;
+  CFG.pausedStrategies.push(...buildUserDisabledStrategies());
   CFG.forwardTestStrategies.clear();
   CFG.overboughtSuppressSet.clear(); // upPct gate reads ES.txt — not applicable for NQ
 }
@@ -517,11 +527,15 @@ const state = {
   pendingRetry:       null,  // { signalId, isLong, contracts, tradeOpts } — set on mismatch close, cleared after one retry attempt
   mismatchRetryDone:  false, // true after one retry attempt today — prevents infinite loop if retry also misfires
 
+  watchdogBusy:       false,    // prevents concurrent watchdog runs
+  lastStopTimes:      new Map(), // signalId → ms timestamp of last stop loss (per-signal 15-min cooldown)
+  watchdogForcedAt:   null,     // ms timestamp of last watchdog-initiated force close
+
   newsBlockUntil:     0,   // epoch ms — no new entries until this time
   isFOMCDay:          false,
 
   // Trend-day filter state (reset each morning at 13:30 UTC)
-  amSessionOpenPrice: null,   // open of first AM bar (13:45 UTC) — trend filter baseline
+  amSessionOpenPrice: null,   // open of first RTH bar (13:30 UTC) — trend filter baseline
   amTrendChecked:     false,  // true once the 30-min check has fired today
   noShortsToday:      false,  // uptrend day: suppress all short signals
   noLongsToday:       false,  // downtrend day: suppress all long signals
@@ -919,6 +933,14 @@ function onTradeEvent(trade) {
     state.dayLosses++;
     state.consecutiveWins = 0;
     state.consecutiveLosses++;
+
+    // Per-signal stop cooldown: block same signal for 15 min after a stop loss.
+    // Prevents immediate re-entry on the same choppy bar (e.g. two BB_SQUEEZE fires in 10 min).
+    if (resolvedSignal !== "RECOVERED" && resolvedSignal !== "unknown") {
+      state.lastStopTimes.set(resolvedSignal, Date.now());
+      console.log(`[Cooldown] 🕐 ${resolvedSignal} stop — 15min re-entry cooldown active`);
+    }
+
     const ct = calcContracts();
     console.log(`[Risk] ❌ Loss — ${resolvedSignal} ${dirLabel} | streak: ${state.consecutiveLosses}L | next trade: ${ct}ct${recovTag}`);
     emitBundleEvent('TRADE_CLOSED', { win: false, pnl: +pnl.toFixed(2), signal: resolvedSignal, dir: dirLabel.toLowerCase(), contracts: knownTrade?.contracts ?? trade.contracts ?? 1 });
@@ -946,7 +968,7 @@ function onTradeEvent(trade) {
   if (!state.profitCappedToday && state.dayPnL >= CFG.dailyProfitCap) {
     state.profitCappedToday = true;
     const capReason = state.simulated
-      ? `Stopping to protect consistency rule\nCombine: $${(state.balance - 50000).toFixed(0)} / $${CFG.combineTarget.toFixed(2)}`
+      ? `Stopping to protect consistency rule\nCombine: $${(state.balance - CFG.accountBase).toFixed(0)} / $${CFG.combineTarget.toFixed(2)}`
       : `Locking in a great funded day`;
     console.log(`[Risk] 🏆 Day P&L $${state.dayPnL.toFixed(2)} — profit cap $${CFG.dailyProfitCap} reached. Stopping for the day`);
     notify("🏆 Great day — locked in", `Up $${state.dayPnL.toFixed(0)}\n${capReason}`, "high").catch(()=>{});
@@ -1631,6 +1653,11 @@ async function placeProtectiveOrders(entryOrderId, fillPrice) {
   // ── Track for OCO (cancel survivor when the other fills) ──────────────────
   if (slId) state.openTrades.set(slId, { signalId, isLong, contracts, isProtective: true, pairedWith: tpId });
   if (tpId) state.openTrades.set(tpId, { signalId, isLong, contracts, isProtective: true, pairedWith: slId });
+
+  // Update persisted state with real bracket order IDs so recoverOpenPosition can restore
+  // state.openTrades by exact orderId — eliminates RECOVERED classification after restarts
+  persistOpenTrade({ entryOrderId, signalId, isLong, contracts, fillPrice,
+    stopTicks, tpTicks, stopType, slId: slId || null, tpId: tpId || null });
 }
 
 // ─── Boot: open-position recovery ────────────────────────────────────────────
@@ -1668,17 +1695,24 @@ async function recoverOpenPosition() {
   const dir = posIsLong ? "long" : "short";
   state.activeDirections.add(dir);
 
-  // Use a synthetic order ID since we lost the real one — just needs to be in the map
+  // Restore with real SL/TP order IDs when available so state.openTrades.get(closingOrderId)
+  // succeeds on the live close event — prevents RECOVERED classification after restarts
+  const savedSlId   = persisted.slId ? String(persisted.slId) : null;
+  const savedTpId   = persisted.tpId ? String(persisted.tpId) : null;
   const syntheticId = `recovered-boot-${Date.now()}`;
-  state.openTrades.set(syntheticId, {
-    signalId:  persisted.signalId,
-    isLong:    posIsLong,
-    contracts: persisted.contracts ?? openPos.size,
-    protected: false,
-    stopTicks: persisted.stopTicks ?? CFG.stopLossTicks,
-    tpTicks:   persisted.tpTicks   ?? CFG.tpTicks,
-    stopType:  persisted.stopType  ?? "trail",
-  });
+  const tradeEntry  = {
+    signalId:     persisted.signalId,
+    isLong:       posIsLong,
+    contracts:    persisted.contracts ?? openPos.size,
+    isProtective: true,
+    protected:    false,
+    stopTicks:    persisted.stopTicks ?? CFG.stopLossTicks,
+    tpTicks:      persisted.tpTicks   ?? CFG.tpTicks,
+    stopType:     persisted.stopType  ?? "trail",
+  };
+  if (savedSlId) state.openTrades.set(savedSlId, { ...tradeEntry, pairedWith: savedTpId ?? "" });
+  if (savedTpId) state.openTrades.set(savedTpId, { ...tradeEntry, pairedWith: savedSlId ?? "" });
+  if (!savedSlId && !savedTpId) state.openTrades.set(syntheticId, tradeEntry);
 
   // Verify protective orders are still on the book
   const closeSide  = posIsLong ? OrderSide.Ask : OrderSide.Bid;
@@ -1690,7 +1724,9 @@ async function recoverOpenPosition() {
   );
 
   if (hasProtection) {
-    state.openTrades.get(syntheticId).protected = true;
+    if (savedSlId && state.openTrades.has(savedSlId)) state.openTrades.get(savedSlId).protected = true;
+    if (savedTpId && state.openTrades.has(savedTpId)) state.openTrades.get(savedTpId).protected = true;
+    if (!savedSlId && !savedTpId) state.openTrades.get(syntheticId).protected = true;
     console.log(`[Boot] ✓ Protective orders confirmed — position is managed`);
   } else {
     // Brackets were lost — re-place them now
@@ -1887,6 +1923,151 @@ setInterval(() => {
   if (inSession) runnerWatchdog().catch(() => {});
 }, 5_000);
 
+// ─── Force-close all open positions + cancel brackets ─────────────────────────
+// Used by the active watchdog for mismatch corrections and ghost position cleanup.
+async function forceCloseAll(reason) {
+  if (!state.accountId || !state.contractId) return false;
+  if (!state.openPositionDir || state.openPositionSize === 0) return false;
+
+  const closeSide = state.openPositionDir === "long" ? OrderSide.Ask : OrderSide.Bid;
+  console.warn(`[Watchdog] 🔴 Force-closing ${state.openPositionDir.toUpperCase()} ${state.openPositionSize}ct — ${reason}`);
+  notify(
+    `🔴 Watchdog force-closed ${state.openPositionDir.toUpperCase()}`,
+    reason,
+    "urgent"
+  ).catch(() => {});
+
+  // Cancel all known protective orders so we don't end up with orphaned brackets
+  for (const [orderId, trade] of state.openTrades.entries()) {
+    if (trade.isProtective) {
+      apiPost("/api/Order/cancel", { orderId, accountId: state.accountId }).catch(() => {});
+    }
+  }
+
+  const data = await apiPost("/api/Order/place", {
+    accountId:  state.accountId,
+    contractId: state.contractId,
+    type:       OrderType.Market,
+    side:       closeSide,
+    size:       state.openPositionSize,
+    customTag:  `WATCHDOG_CLOSE_${Date.now()}`,
+  });
+
+  if (data.success) {
+    console.log(`[Watchdog] ✓ Force close placed orderId=${data.orderId ?? data.id}`);
+    return true;
+  } else {
+    console.error(`[Watchdog] ✗ Force close failed: ${data.errorMessage}`);
+    return false;
+  }
+}
+
+// ─── Active position watchdog (60s) ──────────────────────────────────────────
+// Polls every 60s during session hours. Catches three failure modes:
+//   1. Direction mismatch  — position opened in wrong direction vs engine intent
+//   2. Ghost position      — exchange has an open position the engine doesn't know about
+//                            (manual trade, rogue fill, etc.) — closes for safety
+//   3. Naked position      — position open with no SL/TP on the book — re-places brackets
+//
+// After a watchdog-forced close, re-entry is evaluated on the next bar boundary
+// via the normal tick/runEvaluate loop, with a slippage guard: won't re-enter if
+// price has moved more than 20 ticks from the original entry price.
+async function activePositionWatchdog() {
+  if (state.watchdogBusy) return;
+  if (!state.accountId) return;
+  if (state.haltedToday || state.profitCappedToday) return;
+
+  state.watchdogBusy = true;
+  try {
+    // ── Get actual open position from API ────────────────────────────────────
+    const posData = await apiPost("/api/Position/searchOpen", { accountId: state.accountId });
+    if (!posData.success) return;
+    const openPositions = (posData.positions ?? []).filter(p => (p.size ?? 0) !== 0);
+
+    // Nothing open — reconcilePositions() already handles clearing stuck gates
+    if (openPositions.length === 0) return;
+
+    const actualPos    = openPositions[0];
+    const actualIsLong = actualPos.type === 1;
+    const actualDir    = actualIsLong ? "long" : "short";
+    const actualSize   = Math.abs(actualPos.size ?? 0);
+
+    const engineExpectsLong  = state.activeDirections.has("long");
+    const engineExpectsShort = state.activeDirections.has("short");
+    const engineExpectsFlat  = !engineExpectsLong && !engineExpectsShort;
+
+    // ── 1. Direction mismatch ────────────────────────────────────────────────
+    const dirMismatch = (actualDir === "long"  && engineExpectsShort) ||
+                        (actualDir === "short" && engineExpectsLong);
+
+    if (dirMismatch) {
+      const intendedDir = engineExpectsLong ? "long" : "short";
+      console.error(`[Watchdog] 🚨 Direction mismatch — engine wants ${intendedDir.toUpperCase()} but API has ${actualDir.toUpperCase()}`);
+      // onPositionEvent already fires the mismatch retry path — if it already handled
+      // this, skip to avoid double-close. Only intervene if no pendingRetry queued.
+      if (!state.pendingRetry) {
+        await forceCloseAll(`Watchdog: intended ${intendedDir.toUpperCase()}, exchange opened ${actualDir.toUpperCase()}`);
+        state.watchdogForcedAt = Date.now();
+      }
+      return;
+    }
+
+    // ── 2. Ghost position (untracked manual or rogue fill) ───────────────────
+    // Engine is flat (no active directions, no openTrades) but exchange has a position.
+    const ghostPosition = engineExpectsFlat && state.openTrades.size === 0 && actualSize > 0;
+    if (ghostPosition) {
+      console.warn(`[Watchdog] 👻 Ghost position — ${actualDir.toUpperCase()} ${actualSize}ct on exchange, engine is flat`);
+      notify(
+        `⚠️ Untracked position closed`,
+        `${actualDir.toUpperCase()} ${actualSize}ct open on exchange but engine has no record.\nClosing for safety (possible manual trade).`,
+        "urgent"
+      ).catch(() => {});
+      await forceCloseAll(`Watchdog: untracked ${actualDir.toUpperCase()} position`);
+      return;
+    }
+
+    // ── 3. Naked position — protective orders missing ────────────────────────
+    if (!engineExpectsFlat) {
+      const closeSide     = actualIsLong ? OrderSide.Ask : OrderSide.Bid;
+      const ordData       = await apiPost("/api/Order/searchOpen", { accountId: state.accountId });
+      const openOrders    = ordData.orders ?? ordData.items ?? [];
+      const hasProtection = openOrders.some(ord =>
+        ord.side === closeSide &&
+        (ord.type === OrderType.TrailingStop || ord.type === OrderType.Stop || ord.type === OrderType.Limit)
+      );
+
+      if (!hasProtection && state.openTrades.size > 0) {
+        console.warn(`[Watchdog] ⚠️  Naked position — ${actualDir.toUpperCase()} ${actualSize}ct has no SL/TP`);
+        notify(
+          `⚠️ Naked position — re-placing brackets`,
+          `${actualDir.toUpperCase()} ${actualSize}ct has no protective orders`,
+          "urgent"
+        ).catch(() => {});
+        const persisted = loadPersistedOpenTrade();
+        if (persisted?.fillPrice) {
+          const entryKey = [...state.openTrades.keys()][0];
+          if (entryKey) await placeProtectiveOrders(entryKey, persisted.fillPrice);
+        } else {
+          console.error(`[Watchdog] Cannot re-place protection — fill price unknown, closing to prevent runaway`);
+          await forceCloseAll(`Watchdog: naked position, fill price unknown`);
+        }
+      }
+    }
+
+  } catch (e) {
+    console.warn(`[Watchdog] Error: ${e.message}`);
+  } finally {
+    state.watchdogBusy = false;
+  }
+}
+
+// 60-second active position watchdog — covers AM and PM windows with buffer
+setInterval(() => {
+  const hm = new Date().getUTCHours() * 100 + new Date().getUTCMinutes();
+  const inRange = (hm >= 1300 && hm < 1530) || (hm >= 1800 && hm < 2030);
+  if (inRange) activePositionWatchdog().catch(() => {});
+}, 60_000);
+
 // ─── Strategy evaluation ──────────────────────────────────────────────────────
 // ATR-adaptive trail distance for 5m entries. Falls back to fixed CFG.trailTicks
 // if ATR can't be computed (not enough bars). Same 150-bar slice as strategies.js
@@ -1919,34 +2100,14 @@ function runEvaluate() {
   const now = new Date();
   const hm  = now.getUTCHours() * 100 + now.getUTCMinutes();
 
-  // AM session: 13:45–15:00 UTC (skip first 15 min of RTH — opening range chaos)
-  // PM session: 18:30–19:00 UTC (strategies.js PM_END=1900; 18:00–18:30 is lunch lull)
-  // FOMC days: PM session disabled entirely (too unpredictable post-announcement)
-  // Early-close days: PM session disabled
-  const inAM = hm >= 1345 && hm < 1500;
-  const inPM = hm >= 1830 && hm < 1900 && !state.isFOMCDay && !isTodayEarlyClose();
-  if (!inAM && !inPM) return;
-
-  // Monday PM filter: Mon PM has 0%WR longs / 5.3%WR shorts (-$6,175 net, 4.5yr) — skip PM entirely
-  if (inPM && now.getUTCDay() === 1) return;
-  // Gap-up PM filter: gap-up days (AM open >1pt above prior close) have 9.9%WR in PM (-$82/tr, 4.5yr)
-  if (inPM && state.gapUpDay) return;
-
-  const contracts = calcContracts();
-
-  // ATR volatility filter: skip all entries when market is too choppy.
-  const curATR = currentATR();
-  if (curATR !== null && curATR < CFG.atrMinFilter) {
-    const hm2 = new Date().getUTCHours() * 100 + new Date().getUTCMinutes();
-    console.log(`[ATR] ${hm2} UTC — ATR(20)=${curATR.toFixed(2)}pts < ${CFG.atrMinFilter}pts threshold — skipping bar`);
-    return;
-  }
-
   // ── Trend-day filter + gap detection ──────────────────────────────────────
-  // Step 1: capture AM session open price (first bar at 13:45 UTC, once per day)
-  if (inAM && state.amSessionOpenPrice === null && state.bars.length > 0) {
+  // Step 1: capture AM session open price (RTH open 13:30 UTC, once per day).
+  // Runs BEFORE the inAM session gate so the 13:30 bar (closed and reliable) is
+  // captured at the 13:34:50 pre-close tick — avoids the race where the 13:45 bar
+  // has just opened (0s old) and the API doesn't return it yet as a partial bar.
+  if (hm >= 1330 && hm < 1500 && state.amSessionOpenPrice === null && state.bars.length > 0) {
     const todayAMStart = (() => {
-      const d = new Date(); d.setUTCHours(13, 45, 0, 0); return d.getTime() / 1000;
+      const d = new Date(); d.setUTCHours(13, 30, 0, 0); return d.getTime() / 1000;
     })();
     const firstAMBar = state.bars.find(b => b.time >= todayAMStart);
     if (firstAMBar) {
@@ -1970,7 +2131,29 @@ function runEvaluate() {
     }
   }
 
-  // Step 2: at 14:15 UTC (30 min into AM), evaluate the move and set day flags.
+  // Session gate — signal evaluation only runs during active trading windows.
+  // AM session: 13:45–15:00 UTC (skip first 15 min of RTH — opening range chaos)
+  // PM session: 18:30–19:00 UTC (strategies.js PM_END=1900; 18:00–18:30 is lunch lull)
+  const inAM = hm >= 1345 && hm < 1500;
+  const inPM = hm >= 1830 && hm < 1900 && !state.isFOMCDay && !isTodayEarlyClose();
+  if (!inAM && !inPM) return;
+
+  // Monday PM filter: Mon PM has 0%WR longs / 5.3%WR shorts (-$6,175 net, 4.5yr) — skip PM entirely
+  if (inPM && now.getUTCDay() === 1) return;
+  // Gap-up PM filter: gap-up days (AM open >1pt above prior close) have 9.9%WR in PM (-$82/tr, 4.5yr)
+  if (inPM && state.gapUpDay) return;
+
+  const contracts = calcContracts();
+
+  // ATR volatility filter: skip all entries when market is too choppy.
+  const curATR = currentATR();
+  if (curATR !== null && curATR < CFG.atrMinFilter) {
+    const hm2 = new Date().getUTCHours() * 100 + new Date().getUTCMinutes();
+    console.log(`[ATR] ${hm2} UTC — ATR(20)=${curATR.toFixed(2)}pts < ${CFG.atrMinFilter}pts threshold — skipping bar`);
+    return;
+  }
+
+  // Step 2: at 14:15 UTC (45 min after RTH open), evaluate the move and set day flags.
   if (inAM && !state.amTrendChecked && hm >= 1415) {
     state.amTrendChecked = true;
     if (state.amSessionOpenPrice === null) {
@@ -1980,18 +2163,18 @@ function runEvaluate() {
       const sign = move >= 0 ? "+" : "";
       if (move >= CFG.uptrendFilterPts) {
         state.noShortsToday = true;
-        const msg = `AM ${sign}${move.toFixed(2)}pts in 30min → shorts suppressed rest of day`;
+        const msg = `AM ${sign}${move.toFixed(2)}pts in 45min → shorts suppressed rest of day`;
         console.log(`[Trend] ↑ UPTREND DAY — ${msg}`);
         emitBundleEvent('TREND_FILTER', { dir: 'up', move: +move.toFixed(2) });
         notify("📈 Uptrend Day", msg, "default").catch(console.error);
       } else if (move <= -CFG.downtrendFilterPts) {
         state.noLongsToday = true;
-        const msg = `AM ${sign}${move.toFixed(2)}pts in 30min → longs suppressed rest of day`;
+        const msg = `AM ${sign}${move.toFixed(2)}pts in 45min → longs suppressed rest of day`;
         console.log(`[Trend] ↓ DOWNTREND DAY — ${msg}`);
         emitBundleEvent('TREND_FILTER', { dir: 'down', move: +move.toFixed(2) });
         notify("📉 Downtrend Day", msg, "default").catch(console.error);
       } else {
-        const msg = `AM ${sign}${move.toFixed(2)}pts in 30min — all signals active`;
+        const msg = `AM ${sign}${move.toFixed(2)}pts in 45min — all signals active`;
         console.log(`[Trend] → NEUTRAL DAY — ${msg}`);
         notify("→ Neutral Day", msg, "default").catch(console.error);
       }
@@ -2016,9 +2199,21 @@ function runEvaluate() {
     console.log(`[Strategy] ${hm2} UTC — evaluated ${state.bars.length} bars, 0 signals`);
   }
 
+  const _stopCooldownMs = 15 * 60 * 1000;
+  const _now = Date.now();
+
   for (const sig of signals) {
     // Paused strategy gate — skip any signal whose id starts with a paused prefix
     if (CFG.pausedStrategies.some(p => sig.id.startsWith(p))) continue;
+
+    // Per-signal stop cooldown: 15 min after a stop loss, same signal can't re-fire.
+    // Prevents double-entry on choppy bars where the signal fires again within minutes.
+    const _lastStop = state.lastStopTimes.get(sig.id);
+    if (_lastStop && _now - _lastStop < _stopCooldownMs) {
+      const _rem = Math.ceil((_stopCooldownMs - (_now - _lastStop)) / 60000);
+      console.log(`[Cooldown] ${sig.id} skipped — ${_rem}min remaining in post-stop cooldown`);
+      continue;
+    }
 
     // Forward-test gate — log the signal but do NOT place an order.
     // Once ~3mo of live signal data confirms the edge, move to ACTIVE.
@@ -2181,7 +2376,7 @@ async function preSessionBrief() {
 
   const accountMode = state.simulated
     ? (() => {
-        const profit = state.balance != null ? Math.max(0, state.balance - 50000) : null;
+        const profit = state.balance != null ? Math.max(0, state.balance - CFG.accountBase) : null;
         const needed = profit != null ? Math.max(0, CFG.combineTarget - profit) : null;
         return needed != null
           ? (needed <= 0 ? `Account mode        : 🎯 COMBINE PASSED — check Topstep dashboard` : `Account mode        : Combine  $${profit.toFixed(0)} / $${CFG.combineTarget.toFixed(2)}  ($${needed.toFixed(2)} to go)`)
@@ -2200,7 +2395,7 @@ async function preSessionBrief() {
     `Day P&L             : ${dayPnL >= 0 ? "+" : ""}$${dayPnL.toFixed(2)}`,
     `Consec. wins        : ${state.consecutiveWins} | Consec. losses: ${state.consecutiveLosses}`,
     `Peak balance        : ${state.peakBalance != null ? "$" + state.peakBalance.toFixed(2) : "N/A"}`,
-    `Trail DD limit      : $2,000 (warning at $${CFG.trailDDWarn})`,
+    `Trail DD limit      : $${CFG.trailDD.toFixed(0)} EOD-trail (warning at -$${CFG.trailDDWarn})`,
     `Daily loss limit    : $${CFG.dailyLossLimit} | Halted: ${state.haltedToday}`,
     CFG.contractSearch === "NQ"
       ? `5m strategies (V3)  : NQ mode — V3 signals with NQ CFG stops (40t/110t default)`
@@ -2228,7 +2423,7 @@ async function preSessionBrief() {
   const peak       = state.peakBalance ?? balance;
   const ddUsed     = peak != null && balance != null ? Math.max(0, peak - balance) : null;
   const ddBuffer   = ddUsed != null ? Math.max(0, 2000 - ddUsed) : null;
-  const profitSoFar = balance != null ? Math.max(0, balance - 50000) : null;
+  const profitSoFar = balance != null ? Math.max(0, balance - CFG.accountBase) : null;
 
   const bundlePayload = {
     contracts,
@@ -2370,7 +2565,7 @@ async function weeklyRecap() {
               ? "🎯 Combine target reached! — check Topstep dashboard"
               : `$${toTarget.toFixed(2)} to combine target ($${CFG.combineBalance.toFixed(2)})`;
           })()
-        : `⭐ Funded account — total earned: $${Math.max(0, state.balance - 50000).toFixed(0)}`)
+        : `⭐ Funded account — total earned: $${Math.max(0, state.balance - CFG.accountBase).toFixed(0)}`)
     : "";
 
   const body = [
