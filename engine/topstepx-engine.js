@@ -1487,6 +1487,10 @@ async function placeEntry(signalId, isLong, contracts, tradeOpts = {}) {
         }
 
         // No protective orders on the book → bracket wasn't placed
+        if (t.emergencyClose) {
+          console.log(`[Watchdog] ℹ️  ${signalId}: emergency close already in flight — skipping bracket retry`);
+          return;
+        }
         console.warn(`[Watchdog] ⚠️  ${signalId}: no open protective orders found — placing SL/TP now`);
         notify(`⚠️ Bracket missing — ${signalId}`, `Placing SL/TP now (not found on open order book)\n${isLong ? "LONG" : "SHORT"} ${contracts}ct @ ${fp}`, "urgent").catch(() => {});
         t.protected = false;  // unlock so placeProtectiveOrders will run
@@ -1630,6 +1634,39 @@ async function placeProtectiveOrders(entryOrderId, fillPrice) {
   if (!tpOk) console.error(`[Order] ✗ Take profit failed (${signalId}): ${tpData.errorMessage}`);
   else console.log(`[Order] 🎯 Take profit @ ${tpPrice.toFixed(2)} (${tpTicks}t) | orderId=${tpId}`);
 
+  // ── Stop failed: emergency market close ───────────────────────────────────
+  // If the stop can't be placed (market moved through it before placement),
+  // we must close at market immediately — never leave a position naked.
+  if (!slOk) {
+    trade.emergencyClose = true;  // flag so 3s watchdog doesn't double-retry
+    console.error(`[Order] 🚨 Stop placement failed for ${signalId} — emergency market close to prevent naked position`);
+    notify(
+      `🚨 Stop failed → emergency close (${signalId})`,
+      `Stop rejected: ${slDataFinal.errorMessage}\n${isLong ? "LONG" : "SHORT"} ${contracts}ct @ ${fillPrice.toFixed(2)}\nClosing at market now.`,
+      "urgent"
+    ).catch(() => {});
+    const emgData = await apiPost("/api/Order/place", {
+      accountId:  state.accountId,
+      contractId: state.contractId,
+      type:       OrderType.Market,
+      side:       closeSide,
+      size:       contracts,
+      customTag:  `${signalId}_EMG_${Date.now()}`,
+    }).catch(e => ({ success: false, errorMessage: e.message }));
+    if (emgData.success) {
+      console.log(`[Order] ✓ Emergency close placed orderId=${emgData.orderId ?? emgData.id}`);
+      if (tpOk) apiPost("/api/Order/cancel", { orderId: tpId, accountId: state.accountId }).catch(() => {});
+    } else {
+      console.error(`[Order] ✗ Emergency close ALSO failed: ${emgData.errorMessage} — MANUAL INTERVENTION NEEDED`);
+      notify(
+        `🚨🚨 MANUAL CLOSE NEEDED — ${signalId}`,
+        `Stop AND emergency market close both failed.\nPosition is NAKED — close manually NOW!\n${isLong ? "LONG" : "SHORT"} ${contracts}ct`,
+        "urgent"
+      ).catch(() => {});
+    }
+    return;  // do not set up OCO tracking — position is closing
+  }
+
   // ── Notify on success ─────────────────────────────────────────────────────
   if (slOk && tpOk) {
     const dir  = isLong ? "LONG" : "SHORT";
@@ -1641,13 +1678,13 @@ async function placeProtectiveOrders(entryOrderId, fillPrice) {
       "default"
     ).catch(()=>{});
   } else {
-    // Partial or total failure — alert urgently
+    // TP failed but stop is placed — position is protected, just missing upside
     const failMsg = [
-      !slOk ? `❌ Stop FAILED: ${slDataFinal.errorMessage}` : `✅ Stop placed`,
-      !tpOk ? `❌ TP FAILED: ${tpData.errorMessage}`   : `✅ TP placed`,
+      `✅ Stop placed`,
+      `❌ TP FAILED: ${tpData.errorMessage}`,
     ].join("\n");
-    notify(`⚠️ Protective order issue — ${signalId}`, failMsg, "urgent").catch(()=>{});
-    console.error(`[Order] ⚠️  Protective order partially failed for ${signalId} — check position manually!`);
+    notify(`⚠️ TP order failed — ${signalId}`, failMsg, "urgent").catch(()=>{});
+    console.error(`[Order] ⚠️  TP placement failed for ${signalId} — stop is live but no take profit`);
   }
 
   // ── Track for OCO (cancel survivor when the other fills) ──────────────────
