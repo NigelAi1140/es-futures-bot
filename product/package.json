@@ -1,6 +1,6 @@
 {
   "name": "es-futures-bot",
-  "version": "1.1.49",
+  "version": "1.1.50",
   "description": "ES Futures algorithmic trading bot for TopstepX combines",
   "type": "module",
   "main": "electron/main.js",
