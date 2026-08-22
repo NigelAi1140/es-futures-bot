@@ -1784,7 +1784,13 @@ async function recoverOpenPosition() {
 async function reconcileMissedTrades() {
   if (!state.accountId) return;
   try {
-    const since = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    // Look back to today's session start (13:30 UTC) so we never replay yesterday's trades.
+    // If we're before today's 13:30, fall back to 2h to avoid a future-timestamp.
+    const todaySessionStart = new Date();
+    todaySessionStart.setUTCHours(13, 30, 0, 0);
+    const since = (new Date() >= todaySessionStart)
+      ? todaySessionStart.toISOString()
+      : new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
     const data = await apiPost("/api/Trade/search", {
       accountId:      state.accountId,
       startTimestamp: since,
@@ -1925,6 +1931,13 @@ async function reconcileDayPnL(label) {
       writeSharedState(state.dayPnL);
     } else {
       console.log(`[PnL] ✓ ${label} reconcile — balance $${realBalance.toFixed(2)} | day P&L $${realDayPnL.toFixed(2)} (in sync)`);
+    }
+
+    // If a false halt was set (e.g. double-counted losses after restart), clear it
+    if (state.haltedToday && state.dayPnL > -CFG.dailyLossLimit) {
+      console.warn(`[PnL] ⚠️  Clearing false halt — reconciled day P&L $${state.dayPnL.toFixed(0)} is above limit -$${CFG.dailyLossLimit}`);
+      state.haltedToday = false;
+      notify("✅ Halt cleared by reconciliation", `Reconciled P&L: $${state.dayPnL.toFixed(0)}\nAbove daily limit — trading resumed`, "default").catch(() => {});
     }
   } catch { /* non-fatal */ }
 }
