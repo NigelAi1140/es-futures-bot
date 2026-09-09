@@ -19,8 +19,8 @@ import axios from "axios";
 import { HubConnectionBuilder, HttpTransportType, LogLevel } from "@microsoft/signalr";
 import dotenv from "dotenv";
 import { evaluate, evaluateExtended } from "./strategies.js";
-import { evaluateNQ } from "./nq-strategies.js";
-import { atr } from "./indicators.js";
+import { evaluateNQ, resetConfRevState } from "./nq-strategies.js";
+import { atr, volumeSMA } from "./indicators.js";
 import { appendFileSync, writeFileSync, mkdirSync, existsSync, readFileSync } from "fs";
 import { resolve, dirname, join } from "path";
 import { fileURLToPath } from "url";
@@ -103,6 +103,31 @@ function loadPersistedOpenTrade() {
     if (d && d.signalId) return d;
   } catch {}
   return null;
+}
+
+// Persist seenTradeIds across restarts — prevents reconcileMissedTrades from
+// double-counting trades that were already processed before the restart.
+function seenTradesPath() {
+  const acctId = process.env.ACCOUNT_ID || "default";
+  return resolve(LOGS_DIR, `seen-trades-${acctId}.json`);
+}
+function loadSeenTradeIds() {
+  try {
+    const raw = readFileSync(seenTradesPath(), "utf8");
+    const { date, ids } = JSON.parse(raw);
+    const today = new Date().toISOString().slice(0, 10);
+    if (date === today && Array.isArray(ids)) {
+      console.log(`[SeenTrades] Restored ${ids.length} trade IDs from disk`);
+      return new Set(ids.map(String));
+    }
+  } catch {}
+  return new Set();
+}
+function saveSeenTradeIds() {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    writeFileSync(seenTradesPath(), JSON.stringify({ date: today, ids: [...state.seenTradeIds].slice(-1000) }));
+  } catch {}
 }
 
 dotenv.config({ path: new URL("../.env", import.meta.url).pathname });
@@ -315,7 +340,7 @@ function logWeeklySummary(record) {
 // V3 signals (2026-08-02 quant rebuild — see strategies.js header for methodology)
 // NQ_BB_SQUEEZE_L/S are NQ-only signals from nq-strategies.js — must be in this list
 // or they bypass the ENABLED_STRATEGIES whitelist filter entirely.
-const ACTIVE_STRATEGIES = ["DONCH15_L","VOLBO_L","VOLBO_S","EMA21_PULL_L","BO10_S","3BAR_BEAR_S","KELT_L","NQ_BB_SQUEEZE_L","NQ_BB_SQUEEZE_S","NQ_DONCHIAN_BO_L","NQ_DONCHIAN_BO_S","NQ_VWAP_TOUCH_L","NQ_VWAP_TOUCH_S"];
+const ACTIVE_STRATEGIES = ["DONCH15_L","VOLBO_L","VOLBO_S","EMA21_PULL_L","BO10_S","3BAR_BEAR_S","KELT_L","NQ_BB_SQUEEZE_L","NQ_BB_SQUEEZE_S","NQ_DONCHIAN_BO_L","NQ_DONCHIAN_BO_S","NQ_VWAP_TOUCH_L","NQ_VWAP_TOUCH_S","CONF_TREND_L","CONF_TREND_S","CONF_REV_L","CONF_REV_S"];
 function buildUserDisabledStrategies() {
   const env = process.env.ENABLED_STRATEGIES;
   if (!env) return [];
@@ -503,7 +528,7 @@ const state = {
 
   activeDirections:   new Set(),    // "long" | "short" — direction gate (SHARED by 5m + 15m)
   openTrades:         new Map(),    // orderId → { signalId, isLong }
-  seenTradeIds:       new Set(),    // trade IDs already processed via SignalR (dedup guard)
+  seenTradeIds:       loadSeenTradeIds(),  // persisted across restarts — prevents double-count on reconcile
 
   consecutiveLosses:  0,
   consecutiveWins:    0,
@@ -826,7 +851,7 @@ function onTradeEvent(trade) {
 
   // Mark this trade ID as seen so reconcileMissedTrades() won't re-process it
   const tradeId = trade.id ?? trade.tradeId ?? null;
-  if (tradeId != null) state.seenTradeIds.add(String(tradeId));
+  if (tradeId != null) { state.seenTradeIds.add(String(tradeId)); saveSeenTradeIds(); }
 
   // Skip voided trades — platform can void fills on bad ticks; voided P&L must not count
   if (trade.voided) {
@@ -1431,6 +1456,15 @@ async function placeEntry(signalId, isLong, contracts, tradeOpts = {}) {
       return;
     }
 
+    // Position Brackets conflict — account has Auto OCO Brackets disabled
+    if (/position.brackets|auto.oco/i.test(errMsg)) {
+      notify("🔧 Fix needed — Position Brackets",
+        `Signal: ${signalId}\nTopstepX account has Position Brackets ON.\nGo to account settings → switch to Auto OCO Brackets → leave templates blank.\nEngine cannot place stops until this is fixed.`,
+        "urgent"
+      ).catch(() => {});
+      return;
+    }
+
     // All other failures — notify with clear context and give up
     const hint = isMargin ? "\n⚠️ Scaling plan limit — check XFA balance tier" : "";
     notify("❌ Order rejected", `${signalId} ${dir.toUpperCase()} ${contracts}ct\nReason: ${errMsg}${hint}`, "urgent").catch(()=>{});
@@ -1638,6 +1672,13 @@ async function placeProtectiveOrders(entryOrderId, fillPrice) {
   // If the stop can't be placed (market moved through it before placement),
   // we must close at market immediately — never leave a position naked.
   if (!slOk) {
+    // Position Brackets conflict is a config issue, not a market-movement issue
+    if (/position.brackets|auto.oco/i.test(slDataFinal.errorMessage ?? "")) {
+      notify("🔧 Fix needed — Position Brackets",
+        `Stop order blocked for ${signalId}.\nTopstepX account has Position Brackets ON — switch to Auto OCO Brackets in account settings (leave templates blank).\nClosing position now as safety measure.`,
+        "urgent"
+      ).catch(() => {});
+    }
     trade.emergencyClose = true;  // flag so 3s watchdog doesn't double-retry
     console.error(`[Order] 🚨 Stop placement failed for ${signalId} — emergency market close to prevent naked position`);
     notify(
@@ -1784,13 +1825,14 @@ async function recoverOpenPosition() {
 async function reconcileMissedTrades() {
   if (!state.accountId) return;
   try {
-    // Look back to today's session start (13:30 UTC) so we never replay yesterday's trades.
-    // If we're before today's 13:30, fall back to 2h to avoid a future-timestamp.
+    // Always look back to today's session start (13:30 UTC) — never earlier.
+    // Before 13:30 UTC there's no AM session yet, so nothing to reconcile.
+    // The 2-hour fallback was removed because it could pick up yesterday's PM trades
+    // and double-count them (seenTradeIds now persists to disk as a second guard).
     const todaySessionStart = new Date();
     todaySessionStart.setUTCHours(13, 30, 0, 0);
-    const since = (new Date() >= todaySessionStart)
-      ? todaySessionStart.toISOString()
-      : new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    if (new Date() < todaySessionStart) return; // nothing to reconcile yet
+    const since = todaySessionStart.toISOString();
     const data = await apiPost("/api/Trade/search", {
       accountId:      state.accountId,
       startTimestamp: since,
@@ -1812,7 +1854,7 @@ async function reconcileMissedTrades() {
       const tid = String(trade.id ?? trade.tradeId ?? "");
       if (!tid || state.seenTradeIds.has(tid)) continue;
       const pnl = trade.profitAndLoss ?? 0;
-      if (pnl === 0) { state.seenTradeIds.add(tid); continue; } // entry fill — skip
+      if (pnl === 0) { state.seenTradeIds.add(tid); saveSeenTradeIds(); continue; } // entry fill — skip
 
       // Try to recover direction from persisted file or from matching entry fill
       let signalId   = "RECOVERED";
@@ -1858,6 +1900,7 @@ async function reconcileMissedTrades() {
       };
       onTradeEvent(normalized);
     }
+    saveSeenTradeIds();
   } catch (e) {
     console.warn("[Recovery] Could not fetch missed trades:", e.message);
   }
@@ -2184,7 +2227,8 @@ function runEvaluate() {
   // Session gate — signal evaluation only runs during active trading windows.
   // AM session: 13:45–15:00 UTC (skip first 15 min of RTH — opening range chaos)
   // PM session: 18:30–19:00 UTC (strategies.js PM_END=1900; 18:00–18:30 is lunch lull)
-  const inAM = hm >= 1345 && hm < 1500;
+  // FOMC days: block AM too — pre-announcement market is directionless/whipsaw
+  const inAM = hm >= 1345 && hm < 1500 && !state.isFOMCDay;
   const inPM = hm >= 1830 && hm < 1900 && !state.isFOMCDay && !isTodayEarlyClose();
   if (!inAM && !inPM) return;
 
@@ -2347,7 +2391,7 @@ function runEvaluate15() {
   const now = new Date();
   const hm  = now.getUTCHours() * 100 + now.getUTCMinutes();
 
-  const inAM = hm >= 1345 && hm < 1500;
+  const inAM = hm >= 1345 && hm < 1500 && !state.isFOMCDay;
   const inPM = hm >= 1830 && hm < 1900 && !state.isFOMCDay && !isTodayEarlyClose();
   if (!inAM && !inPM) return;
 
@@ -2424,6 +2468,14 @@ async function preSessionBrief() {
   const { contracts, regimeLabel, streakLabel, regimeMult, streakMult } = calcContractsVerbose();
   const dayPnL = state.dayPnL;
 
+  // Volume snapshot — same 20-bar SMA the BB_SQUEEZE / DONCHIAN gates use
+  const volAvg20 = volumeSMA(state.bars, 20);
+  const lastVol  = state.bars.at(-1)?.volume ?? null;
+  const volPct   = (volAvg20 && lastVol != null) ? Math.round((lastVol / volAvg20) * 100) : null;
+  const volLine  = volPct != null
+    ? `Vol (last 5m bar)   : ${lastVol.toLocaleString()} vs avg ${Math.round(volAvg20).toLocaleString()} — ${volPct}% ${volPct >= 120 ? "✅ gate open" : volPct >= 80 ? "⚠️  borderline" : "🔇 quiet — signals unlikely"}`
+    : `Vol (last 5m bar)   : N/A (not enough bars yet)`;
+
   const accountMode = state.simulated
     ? (() => {
         const profit = state.balance != null ? Math.max(0, state.balance - CFG.accountBase) : null;
@@ -2459,11 +2511,12 @@ async function preSessionBrief() {
         ? `Paused strategies   : none (all 7 V3 signals active)`
         : `Paused strategies   : ⚠️  ${userDisabled.join(", ")} (disabled by user config)`;
     })(),
-    `AM session          : ${isDST() ? "7:45–9:00 MDT" : "6:45–8:00 MST"} (13:45-15:00 UTC)`,
+    `AM session          : ${state.isFOMCDay ? "⛔ DISABLED (FOMC day)" : `${isDST() ? "7:45–9:00 MDT" : "6:45–8:00 MST"} (13:45-15:00 UTC)`}`,
     `PM session          : ${state.isFOMCDay ? "⛔ DISABLED (FOMC day)" : isTodayEarlyClose() ? "⛔ DISABLED (early close)" : `${isDST() ? "12:30–1:00 PM MDT" : "11:30 AM–12:00 PM MST"} (18:30-19:00 UTC)`}`,
     `Trend filter        : ${state.noShortsToday ? "📈 UPTREND — shorts suppressed" : state.noLongsToday ? "📉 DOWNTREND — longs suppressed" : state.amTrendChecked ? "→ Neutral — all signals active" : "⏳ Pending (fires at 14:15 UTC)"}`,
     `Overbought gate     : ${state.upPctOverbought ? "🔴 ACTIVE — trending strats suppressed (8+/10 days up)" : "✅ Off"}`,
     `News blocks today   : ${(state._newsBlocks?.length || 0)} Tier-1 event(s)`,
+    volLine,
     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
     ``,
   ];
@@ -2509,6 +2562,7 @@ async function preSessionBrief() {
       : null,
     `News: ${state._newsBlocks?.length || 0}  |  FOMC: ${state.isFOMCDay ? "YES ⚠️" : "No"}`,
     `Trend: ${bundlePayload.trendStatus}`,
+    volPct != null ? `Vol: ${volPct}% of avg ${volPct >= 120 ? "✅" : volPct >= 80 ? "⚠️" : "🔇"}` : null,
     `AM 7:45 ${bundlePayload.tz}  |  PM 12:30–2:00`,
   ].filter(Boolean).join("\n");
   await notify("📊 Pre-session brief", briefMsg, "default");
@@ -2768,6 +2822,11 @@ async function tick() {
       } catch { /* non-fatal */ }
     }
     state.startOfDayBalance = state.balance;  // snapshot for post-session reconciliation
+    // Clear persisted seenTradeIds so today's file starts fresh (yesterday's IDs are irrelevant)
+    state.seenTradeIds = new Set();
+    saveSeenTradeIds();
+    // Clear CONF_REV session state so prior day's push/arm data doesn't bleed into today
+    resetConfRevState();
     console.log(`[Day] ✓ New session — daily counters reset | start balance: $${state.balance?.toFixed(2) ?? 'unknown'}`);
   }
 

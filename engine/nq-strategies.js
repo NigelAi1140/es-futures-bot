@@ -23,7 +23,39 @@
 //
 // NQ tick structure: $5/tick, 0.25pt tick size → 100t = 25pts = $500/ct
 
-import { ema, adx, bollingerBands, highestHighPrev, lowestLowPrev, volumeSMA } from "./indicators.js";
+import { ema, adx, rsi, bollingerBands, highestHighPrev, lowestLowPrev, volumeSMA } from "./indicators.js";
+
+// ── CONF_REV session state (module-level, persists across evaluate calls) ─────
+// Tracks per-session open/high/low and which push directions have already fired.
+// Keyed by "YYYY-MM-DD_AM" or "YYYY-MM-DD_PM". resetConfRevState() is called at
+// the engine's daily session reset to prevent memory buildup.
+const _sessState = new Map();
+const _sessArmed = new Map();
+
+function _sessKey(ts) {
+  const d   = new Date(ts * 1000);
+  const hm  = d.getUTCHours() * 100 + d.getUTCMinutes();
+  const day = d.toISOString().slice(0, 10);
+  return `${day}_${(hm >= 1330 && hm < 1500) ? "AM" : "PM"}`;
+}
+
+function _updateSess(bar) {
+  const sk = _sessKey(bar.time);
+  if (!_sessState.has(sk)) {
+    _sessState.set(sk, { open: bar.open, high: bar.high, low: bar.low, bars: 1 });
+  } else {
+    const s = _sessState.get(sk);
+    s.high = Math.max(s.high, bar.high);
+    s.low  = Math.min(s.low,  bar.low);
+    s.bars++;
+  }
+  return { sk, sess: _sessState.get(sk) };
+}
+
+export function resetConfRevState() {
+  _sessState.clear();
+  _sessArmed.clear();
+}
 
 const AM_START = 1330, AM_END = 1500;
 const PM_START = 1800, PM_END = 2000;
@@ -200,6 +232,156 @@ export const evaluateNQ = (bars) => {
       break; // one signal per bar (first VWAP that qualifies)
     }
   } while (false);
+
+  // ─── CONF_TREND_L / CONF_TREND_S — Confirmed Session Continuation ────────────
+  // Backtest (2020-2026, 5m signal / 1m exit, 2ct, gate-realistic):
+  //   CONF_TREND_L: 31% WR  +$37,520 total  +$19/tr
+  //   CONF_TREND_S: 30% WR  +$54,640 total  +$17/tr
+  //   Fixed TP 24t / Stop 8t (3:1 R:R) — trail exit was cutting winners short (-$19/tr)
+  //
+  // Entry: session is already moving in one direction (≥15t push from open) →
+  //   price breaks local 3-bar high/low (confirms continuation) → volume ≥1.2× avg.
+  //   Fixed TP 24t ($120/ct), stop 8t ($40/ct). One entry per push event.
+  const TREND_PUSH_T  = 15;  // min session push to qualify (ticks from open)
+  const TREND_VOL     = 1.2; // volume multiplier threshold
+  const TREND_STOP_T  = 8;   // stop distance in ticks ($40/ct)
+  const TREND_TP_T    = 24;  // fixed TP: 24t = $120/ct (3:1 R:R)
+
+  if (bars.length >= 214) {
+    const { sk: skT, sess: sessT } = _updateSess(last);
+
+    if (sessT.bars >= 4) {
+      const closes14T = bars.map(b => b.close);
+      const r14T      = rsi(closes14T, 14);
+
+      // Re-arm when price returns near session open
+      if (Math.abs(last.close - sessT.open) / 0.25 < 5) {
+        _sessArmed.delete(skT + "_TL");
+        _sessArmed.delete(skT + "_TS");
+      }
+
+      const maxUpT   = Math.round((sessT.high  - sessT.open) / 0.25);
+      const maxDownT = Math.round((sessT.open  - sessT.low)  / 0.25);
+
+      const lh3 = Math.max(prev.high, bars[bars.length - 3].high, bars[bars.length - 4].high);
+      const ll3 = Math.min(prev.low,  bars[bars.length - 3].low,  bars[bars.length - 4].low);
+
+      // CONF_TREND_L: session pushed UP → confirm continuation long
+      if (maxUpT >= TREND_PUSH_T &&
+          c > lh3 &&
+          vol >= volAvg20 * TREND_VOL &&
+          last.close > last.open &&
+          r14T !== null && r14T > 30 && r14T < 75 &&
+          !_sessArmed.get(skT + "_TL")) {
+        _sessArmed.set(skT + "_TL", true);
+        signals.push({
+          id:        "CONF_TREND_L",
+          side:      "long",
+          price:     c,
+          stopTicks: TREND_STOP_T,
+          tpTicks:   TREND_TP_T,
+          barHigh:   last.high,
+          barLow:    last.low,
+        });
+      }
+
+      // CONF_TREND_S: session pushed DOWN → confirm continuation short
+      if (maxDownT >= TREND_PUSH_T &&
+          c < ll3 &&
+          vol >= volAvg20 * TREND_VOL &&
+          last.close < last.open &&
+          r14T !== null && r14T < 70 && r14T > 25 &&
+          !_sessArmed.get(skT + "_TS")) {
+        _sessArmed.set(skT + "_TS", true);
+        signals.push({
+          id:        "CONF_TREND_S",
+          side:      "short",
+          price:     c,
+          stopTicks: TREND_STOP_T,
+          tpTicks:   TREND_TP_T,
+          barHigh:   last.high,
+          barLow:    last.low,
+        });
+      }
+    }
+  }
+
+  // ─── CONF_REV_L / CONF_REV_S — Confirmed Session Reversal ────────────────────
+  // Backtest (2020-2026, 5m signal / 1m exit, 2ct, gate-realistic):
+  //   CONF_REV_L: 30% WR  +$8,580 total  +$13/tr
+  //   CONF_REV_S: 33% WR  +$19,200 total  +$20/tr
+  //   Fixed TP 18t / Stop 6t (3:1 R:R) — trail exit was cutting winners short
+  //
+  // Entry requires ALL of:
+  //   1. Session had an initial push ≥ 15 ticks from session open in one direction
+  //   2. Price proves the reversal by closing above/below the prior 3-bar local high/low
+  //   3. Volume confirms: current bar ≥ 1.2× 20-bar avg (real participation, not noise)
+  //   4. One entry per push event — re-arms when price returns within 5t of session open
+  //   5. RSI not extreme (30-65 for longs, 35-70 for shorts)
+  const CONF_PUSH_T = 15;   // min initial push in ticks
+  const CONF_VOL    = 1.2;  // volume multiplier threshold
+  const CONF_STOP_T = 6;    // stop distance in ticks ($30/ct)
+  const CONF_TP_T   = 18;   // fixed TP: 18t = $90/ct (3:1 R:R)
+
+  if (bars.length >= 214) {  // need extra bars for 4-bar lookback + session warmup
+    const { sk, sess } = _updateSess(last);
+
+    if (sess.bars >= 4) {
+      const closes14 = bars.map(b => b.close);
+      const r14      = rsi(closes14, 14);
+
+      // Re-arm when price returns near session open (new push could form)
+      if (Math.abs(last.close - sess.open) / 0.25 < 5) {
+        _sessArmed.delete(sk + "_L");
+        _sessArmed.delete(sk + "_S");
+      }
+
+      const maxDown = Math.round((sess.open - sess.low)  / 0.25);  // ticks dropped from open
+      const maxUp   = Math.round((sess.high  - sess.open) / 0.25); // ticks risen from open
+
+      // Local 3-bar high/low (prior 3 bars, not current) for direction-change proof
+      const localHigh = Math.max(prev.high, bars[bars.length - 3].high, bars[bars.length - 4].high);
+      const localLow  = Math.min(prev.low,  bars[bars.length - 3].low,  bars[bars.length - 4].low);
+
+      // CONF_REV_L: session pushed down ≥15t → price now breaks local high with volume
+      if (maxDown >= CONF_PUSH_T &&
+          c > localHigh &&
+          vol >= volAvg20 * CONF_VOL &&
+          last.close > last.open &&
+          r14 !== null && r14 > 30 && r14 < 65 &&
+          !_sessArmed.get(sk + "_L")) {
+        _sessArmed.set(sk + "_L", true);
+        signals.push({
+          id:        "CONF_REV_L",
+          side:      "long",
+          price:     c,
+          stopTicks: CONF_STOP_T,
+          tpTicks:   CONF_TP_T,
+          barHigh:   last.high,
+          barLow:    last.low,
+        });
+      }
+
+      // CONF_REV_S: session pushed up ≥15t → price now breaks local low with volume
+      if (maxUp >= CONF_PUSH_T &&
+          c < localLow &&
+          vol >= volAvg20 * CONF_VOL &&
+          last.close < last.open &&
+          r14 !== null && r14 < 70 && r14 > 35 &&
+          !_sessArmed.get(sk + "_S")) {
+        _sessArmed.set(sk + "_S", true);
+        signals.push({
+          id:        "CONF_REV_S",
+          side:      "short",
+          price:     c,
+          stopTicks: CONF_STOP_T,
+          tpTicks:   CONF_TP_T,
+          barHigh:   last.high,
+          barLow:    last.low,
+        });
+      }
+    }
+  }
 
   return signals;
 };

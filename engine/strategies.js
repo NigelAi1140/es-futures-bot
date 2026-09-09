@@ -78,10 +78,10 @@ export const evaluate = (bars, opts = {}) => {
 
   // ── 1. DONCH15_L — Donchian 15-bar breakout long ──────────────────────────────
   // First close above the prior 15-bar high. Above EMA200 (bull market), RSI not overbought.
-  // VAL: 29% WR vs 17% BE → solid positive EV. Fires ~226/yr (ES), ~30/mo (NQ 5m).
-  // stop=10t (was 15t): tighter stop improves R:R 4.8→7.2, +$3.5K/yr, -$5.6K MaxDD on NQ.
+  // Backtest (NQ 2020-2026, 5m/1m, 2ct): 31% WR  +$90,900 total  +$14/tr
+  // Fixed TP 18t / Stop 6t (3:1 R:R) — trail exit was cutting winners short.
   if (hi15 && prev.close <= hi15 && c > hi15 && aboveEMA && r14 > 40) {
-    signals.push({ id: "DONCH15_L", side: "long", price: c, stopTicks: 10, tpTicks: 72 });
+    signals.push({ id: "DONCH15_L", side: "long", price: c, stopTicks: 6, tpTicks: 18 });
   }
 
   // ── 2. VOLBO_L — Volume breakout long ─────────────────────────────────────────
