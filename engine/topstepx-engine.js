@@ -340,7 +340,7 @@ function logWeeklySummary(record) {
 // V3 signals (2026-08-02 quant rebuild — see strategies.js header for methodology)
 // NQ_BB_SQUEEZE_L/S are NQ-only signals from nq-strategies.js — must be in this list
 // or they bypass the ENABLED_STRATEGIES whitelist filter entirely.
-const ACTIVE_STRATEGIES = ["DONCH15_L","VOLBO_L","VOLBO_S","EMA21_PULL_L","BO10_S","3BAR_BEAR_S","KELT_L","NQ_BB_SQUEEZE_L","NQ_BB_SQUEEZE_S","NQ_DONCHIAN_BO_L","NQ_DONCHIAN_BO_S","NQ_VWAP_TOUCH_L","NQ_VWAP_TOUCH_S","CONF_TREND_L","CONF_TREND_S","CONF_REV_L","CONF_REV_S"];
+const ACTIVE_STRATEGIES = ["DONCH15_L","VOLBO_L","VOLBO_S","EMA21_PULL_L","BO10_S","3BAR_BEAR_S","KELT_L","NQ_BB_SQUEEZE_L","NQ_BB_SQUEEZE_S","NQ_DONCHIAN_BO_L","NQ_DONCHIAN_BO_S","NQ_VWAP_TOUCH_L","NQ_VWAP_TOUCH_S","CONF_TREND_L","CONF_TREND_S","CONF_REV_L","CONF_REV_S","NQ_ORB_L","NQ_ORB_S"];
 function buildUserDisabledStrategies() {
   const env = process.env.ENABLED_STRATEGIES;
   if (!env) return [];

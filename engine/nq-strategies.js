@@ -2,6 +2,12 @@
 // NQ-native strategies for the NQ futures engine (SYMBOL=NQ).
 // Backtest: NQ.txt 2020-2026, 5m bars, 2 contracts, gate-realistic (1 trade at a time).
 //
+// NQ_ORB_L/S — Opening Range Breakout (15-min OR)
+//   OR: first 3 five-minute bars of RTH (13:30–13:45 UTC). Breakout: first close outside range.
+//   Stop: 8t ($40/ct) | TP: 20t ($100/ct) — 2.5:1 R:R, one trade per day.
+//   Backtest (2020-2026, 5m/1m, 2ct, no filters): +$74,180 total | 45%WR | $46/tr | ~230tr/yr
+//   Trend: $7/tr (2020) → $97/tr (2026) — improving. Every year profitable.
+//
 // NQ_DONCHIAN_BO_L/S — 20-bar Donchian channel breakout
 //   Long:  close breaks above 20-bar high, vol > 1.5x avg, c > EMA50, c > EMA200
 //   Short: close breaks below 20-bar low,  vol > 1.5x avg, c < EMA50, c < EMA200
@@ -25,12 +31,13 @@
 
 import { ema, adx, rsi, bollingerBands, highestHighPrev, lowestLowPrev, volumeSMA } from "./indicators.js";
 
-// ── CONF_REV session state (module-level, persists across evaluate calls) ─────
-// Tracks per-session open/high/low and which push directions have already fired.
-// Keyed by "YYYY-MM-DD_AM" or "YYYY-MM-DD_PM". resetConfRevState() is called at
-// the engine's daily session reset to prevent memory buildup.
+// ── Module-level state (persists across evaluate calls within a trading day) ───
+// _sessState / _sessArmed: CONF_TREND/REV per-session tracking.
+// _orbState: ORB opening range per day — lazy-computed at 13:45 UTC.
+// resetConfRevState() clears all three; called at engine daily reset.
 const _sessState = new Map();
 const _sessArmed = new Map();
+const _orbState  = new Map(); // date string → { high, low, fired }
 
 function _sessKey(ts) {
   const d   = new Date(ts * 1000);
@@ -55,6 +62,7 @@ function _updateSess(bar) {
 export function resetConfRevState() {
   _sessState.clear();
   _sessArmed.clear();
+  _orbState.clear();
 }
 
 const AM_START = 1330, AM_END = 1500;
@@ -230,6 +238,63 @@ export const evaluateNQ = (bars) => {
         _vwap:     label, // diagnostic only
       });
       break; // one signal per bar (first VWAP that qualifies)
+    }
+  } while (false);
+
+  // ─── NQ_ORB_L / NQ_ORB_S — Opening Range Breakout ───────────────────────────
+  // OR = first 3 five-minute bars (13:30–13:45 UTC). Engine only evaluates from 13:45
+  // onwards, so on the first call we scan back to compute OR high/low lazily.
+  // One trade per day — long if first breakout is above OR high, short below OR low.
+  do {
+    const lastD  = new Date(last.time * 1000);
+    const lastHM = lastD.getUTCHours() * 100 + lastD.getUTCMinutes();
+    if (lastHM < 1345 || lastHM >= 1500) break; // AM only, after OR window closes
+
+    const today = lastD.toISOString().slice(0, 10);
+
+    // Lazily build OR from the 13:30/13:35/13:40 bars in the history window
+    if (!_orbState.has(today)) {
+      const orBars = bars.filter(b => {
+        const bd = new Date(b.time * 1000);
+        const bh = bd.getUTCHours() * 100 + bd.getUTCMinutes();
+        return bd.toISOString().slice(0, 10) === today && bh >= 1330 && bh < 1345;
+      });
+      if (orBars.length < 3) break; // OR not complete — skip until bars arrive
+      _orbState.set(today, {
+        high:  Math.max(...orBars.map(b => b.high)),
+        low:   Math.min(...orBars.map(b => b.low)),
+        fired: false,
+      });
+    }
+
+    const orb = _orbState.get(today);
+    if (!orb || orb.fired || !prev) break;
+
+    // Long breakout: first close above OR high
+    if (prev.close <= orb.high && c > orb.high) {
+      orb.fired = true;
+      signals.push({
+        id:        "NQ_ORB_L",
+        side:      "long",
+        price:     c,
+        stopTicks: 8,   // $40/ct
+        tpTicks:   20,  // $100/ct — 2.5:1 R:R (backtest optimal)
+        barHigh:   last.high,
+        barLow:    last.low,
+      });
+    }
+    // Short breakout: first close below OR low
+    else if (prev.close >= orb.low && c < orb.low) {
+      orb.fired = true;
+      signals.push({
+        id:        "NQ_ORB_S",
+        side:      "short",
+        price:     c,
+        stopTicks: 8,   // $40/ct
+        tpTicks:   20,  // $100/ct — 2.5:1 R:R
+        barHigh:   last.high,
+        barLow:    last.low,
+      });
     }
   } while (false);
 
