@@ -1,452 +1,286 @@
-// NQ Strategy Signal Evaluator
-// NQ-native strategies for the NQ futures engine (SYMBOL=NQ).
-// Backtest: NQ.txt 2020-2026, 5m bars, 2 contracts, gate-realistic (1 trade at a time).
+// NQ Strategy Signal Evaluator — Portfolio V5.5 (regime overfit 2026-09-20)
+// Optimized on Jun–Sep 2026 (last 3 months) for Oct–Dec 2026 deployment.
+// Optimizer: greedy per-signal sweep, thresholds × {6,8,10,12}t SL × {16..80}t TP.
+// Next re-opt: end of December 2026 (re-run on Sep–Dec window).
+//   - OB_FADE_S: surge ≥10t (was 15t), SL 12t (was 8t), TP 80t (was 64t)
+//   - AM_VWAP_FADE_S: dev ≥15t (was 25t), SL 6t, TP 72t (was 64t)
+//   - ADR_FADE_S: move ≥35% ADR (was 60%), SL 6t, TP 80t (was 40t)
+//   - 14H_REV_S: ≥25t above AM open (was 40t), SL 6t, TP 80t (was 64t)
+//   - FIRST30_FADE_S: SL 6t (was 8t), TP 40t unchanged
+//   - PM_VWAP_FADE_S: dev ≥15t (was 25t), SL 6t, TP 48t (was 64t)
+//   - OVERNIGHT_TRAP_S: gap ≥20t (was 50t), SL 6t, TP 80t (was 64t)
+//   - SESSION_HIGH_FAIL_S: DISABLED (negative in Jun–Sep 2026)
+// Long fades (OB/VWAP/ADR/FIRST30/PM_L) tombstoned in topstepx-engine.js 2026-09-14.
 //
-// NQ_ORB_L/S — Opening Range Breakout (15-min OR)
-//   OR: first 3 five-minute bars of RTH (13:30–13:45 UTC). Breakout: first close outside range.
-//   Stop: 8t ($40/ct) | TP: 20t ($100/ct) — 2.5:1 R:R, one trade per day.
-//   Backtest (2020-2026, 5m/1m, 2ct, no filters): +$74,180 total | 45%WR | $46/tr | ~230tr/yr
-//   Trend: $7/tr (2020) → $97/tr (2026) — improving. Every year profitable.
-//
-// NQ_DONCHIAN_BO_L/S — 20-bar Donchian channel breakout
-//   Long:  close breaks above 20-bar high, vol > 1.5x avg, c > EMA50, c > EMA200
-//   Short: close breaks below 20-bar low,  vol > 1.5x avg, c < EMA50, c < EMA200
-//   TP: 110t ($550/ct) | Stop: 40t ($200/ct)
-//   Backtest (2020-2026, 5m, NQ session): L 11.2/mo 36%WR +$19,729/yr MaxDD -$12,100
-//                                         S 11.2/mo 34%WR +$14,043/yr MaxDD -$11,900
-//   NOTE: 40t stop = $400/2ct risk. NOT enabled — DONCH15_L covers similar setup at lower risk.
-//
-// NQ_BB_SQUEEZE_L/S — Bollinger Band expansion breakout
-//   Fires when BB is expanding (not contracting), price closes above/below band, vol > 1.2x avg
-//   Long:  above upper band after prior close < upper band, c > EMA200
-//   Short: below lower band after prior close > lower band, c < EMA200
-//   TP: 110t ($550/ct) | Stop: 10t ($50/ct) — tight stop, high R:R (11:1)
-//   Backtest (2020-2026, 5m, NQ session): L 13.6/mo 16%WR +$15,886/yr MaxDD -$5,700
-//                                         S 13.8/mo 20%WR +$23,171/yr MaxDD -$4,600
-//   OOS    (2024-2026, 5m):               L 11.7/mo 20%WR +$20,000/yr MaxDD -$3,000
-//                                         S 13.0/mo 29%WR +$37,967/yr MaxDD -$2,000 ✓
-//   Fills the 19:00-20:00 UTC gap (PM2 hour) not covered by ES-session strategies.
-//
-// NQ tick structure: $5/tick, 0.25pt tick size → 100t = 25pts = $500/ct
+// Signal ID                Gate     Stop  TP   Session
+// NQ_OB_FADE_S             S       12t   80t  AM 13:30 bar        opening bar surge ≥10t
+// NQ_AM_VWAP_FADE_S        S        6t   72t  AM 13:30–15:00 UTC  VWAP dev ≥15t
+// NQ_ADR_FADE_S            S        6t   80t  AM                  move ≥35% ADR from open
+// NQ_14H_REV_S             SINGLE   6t   80t  AM 14:00+ UTC       move ≥25t above AM open
+// NQ_FIRST30_FADE_S        S        6t   40t  AM 14:00+           close breaks prior AM high
+// NQ_PM_VWAP_FADE_S        S        6t   48t  PM 18:00–20:00 UTC  VWAP dev ≥15t
+// NQ_OVERNIGHT_TRAP_S      S        6t   80t  AM 13:30–14:00 UTC  gap up ≥20t, fade < open
+// NQ_SESSION_HIGH_FAIL_S   DISABLED (negative Jun–Sep 2026)
 
-import { ema, adx, rsi, bollingerBands, highestHighPrev, lowestLowPrev, volumeSMA } from "./indicators.js";
+const TICK        = 0.25;
+const AM_OPEN_HM  = 1330;
+const AM_CLOSE_HM = 1500;
+const PM_OPEN_HM  = 1800;
+const PM_CLOSE_HM = 2000;
 
-// ── Module-level state (persists across evaluate calls within a trading day) ───
-// _sessState / _sessArmed: CONF_TREND/REV per-session tracking.
-// _orbState: ORB opening range per day — lazy-computed at 13:45 UTC.
-// resetConfRevState() clears all three; called at engine daily reset.
-const _sessState = new Map();
-const _sessArmed = new Map();
-const _orbState  = new Map(); // date string → { high, low, fired }
+// ── Per-day gate sets (cleared by resetConfRevState at daily reset) ───────────
+const _amVwapFiredL    = new Set();
+const _amVwapFiredS    = new Set();
+const _adrFiredL       = new Set();
+const _adrFiredS       = new Set();
+const _14hRevDate      = new Set(); // SINGLE gate — 1 trade/day regardless of direction
+const _first30FiredL   = new Set();
+const _first30FiredS   = new Set();
+const _pmVwapFiredL    = new Set();
+const _pmVwapFiredS    = new Set();
+const _obFiredL        = new Set();
+const _obFiredS        = new Set();
+const _onTrapFiredS    = new Set();
+const _sesHFFailFiredS = new Set();
 
-function _sessKey(ts) {
-  const d   = new Date(ts * 1000);
-  const hm  = d.getUTCHours() * 100 + d.getUTCMinutes();
-  const day = d.toISOString().slice(0, 10);
-  return `${day}_${(hm >= 1330 && hm < 1500) ? "AM" : "PM"}`;
-}
-
-function _updateSess(bar) {
-  const sk = _sessKey(bar.time);
-  if (!_sessState.has(sk)) {
-    _sessState.set(sk, { open: bar.open, high: bar.high, low: bar.low, bars: 1 });
-  } else {
-    const s = _sessState.get(sk);
-    s.high = Math.max(s.high, bar.high);
-    s.low  = Math.min(s.low,  bar.low);
-    s.bars++;
-  }
-  return { sk, sess: _sessState.get(sk) };
-}
+// ── Persistent cross-session state ────────────────────────────────────────────
+// Survives bar-window resets; cleared only on process restart.
+const _adrDayCache  = new Map(); // date → { hi, lo } of that day's AM session
+const _amHighPerDay = new Map(); // date → max bar-high seen in AM session (for SESSION_HIGH_FAIL_S)
 
 export function resetConfRevState() {
-  _sessState.clear();
-  _sessArmed.clear();
-  _orbState.clear();
+  _amVwapFiredL.clear();
+  _amVwapFiredS.clear();
+  _adrFiredL.clear();
+  _adrFiredS.clear();
+  _14hRevDate.clear();
+  _first30FiredL.clear();
+  _first30FiredS.clear();
+  _pmVwapFiredL.clear();
+  _pmVwapFiredS.clear();
+  _obFiredL.clear();
+  _obFiredS.clear();
+  _onTrapFiredS.clear();
+  _sesHFFailFiredS.clear();
 }
 
-const AM_START = 1330, AM_END = 1500;
-const PM_START = 1800, PM_END = 2000;
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
-const inSession = (barTime) => {
-  const d = new Date(barTime * 1000);
-  const hm = d.getUTCHours() * 100 + d.getUTCMinutes();
-  return (hm >= AM_START && hm < AM_END) || (hm >= PM_START && hm < PM_END);
-};
+function barHM(ts) {
+  const d = new Date(ts * 1000);
+  return d.getUTCHours() * 100 + d.getUTCMinutes();
+}
+function barDate(ts) {
+  return new Date(ts * 1000).toISOString().slice(0, 10);
+}
 
-export const evaluateNQ = (bars) => {
-  if (bars.length < 210) return [];
+// Session VWAP (typical price weighted) over all bars in today's session window.
+function sessionVWAP(bars, today, openHM, closeHM) {
+  let pv = 0, v = 0;
+  for (const b of bars) {
+    if (barDate(b.time) !== today) continue;
+    const hm = barHM(b.time);
+    if (hm < openHM || hm >= closeHM) continue;
+    const tp = (b.high + b.low + b.close) / 3;
+    pv += tp * b.volume;
+    v  += b.volume;
+  }
+  return v > 0 ? pv / v : null;
+}
 
-  const last = bars[bars.length - 1];
-  if (!inSession(last.time)) return [];
+// Update the persistent ADR cache from the current bars array.
+function _updateADRCache(bars, today) {
+  for (const b of bars) {
+    const dt = barDate(b.time);
+    if (dt >= today) continue;
+    const hm = barHM(b.time);
+    if (hm < AM_OPEN_HM || hm >= AM_CLOSE_HM) continue;
+    if (!_adrDayCache.has(dt)) _adrDayCache.set(dt, { hi: b.high, lo: b.low });
+    else { const r = _adrDayCache.get(dt); r.hi = Math.max(r.hi, b.high); r.lo = Math.min(r.lo, b.low); }
+  }
+}
 
-  const closes = bars.map(b => b.close);
+// 20-day ADR from the persistent cache.
+function calcADR20(today) {
+  const ranges = [..._adrDayCache.entries()]
+    .filter(([dt]) => dt < today)
+    .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+    .map(([, r]) => r.hi - r.lo);
+  if (!ranges.length) return null;
+  const recent = ranges.slice(-20);
+  return recent.reduce((a, x) => a + x, 0) / recent.length;
+}
+
+// AM session open price — open of the first bar at or after 13:30 UTC today.
+function amSessionOpen(bars, today) {
+  for (const b of bars) {
+    if (barDate(b.time) === today && barHM(b.time) >= AM_OPEN_HM) return b.open;
+  }
+  return null;
+}
+
+// Last close from any day before today (used by OVERNIGHT_TRAP_S for gap calculation).
+function prevDayClose(bars, today) {
+  for (let i = bars.length - 1; i >= 0; i--) {
+    if (barDate(bars[i].time) < today) return bars[i].close;
+  }
+  return null;
+}
+
+// ── Main evaluator ────────────────────────────────────────────────────────────
+
+export const evaluateNQ = (bars, _esBars = []) => {
+  if (bars.length < 20) return [];
+  const last  = bars[bars.length - 1];
+  const prev  = bars[bars.length - 2]; // previous bar (same or different day)
+  const hm    = barHM(last.time);
+  const today = barDate(last.time);
+  const c     = last.close;
+
+  const inAM = hm >= AM_OPEN_HM && hm < AM_CLOSE_HM;
+  const inPM = hm >= PM_OPEN_HM && hm < PM_CLOSE_HM;
+  if (!inAM && !inPM) return [];
+
+  _updateADRCache(bars, today);
+
+  // Track AM high for SESSION_HIGH_FAIL_S (persists AM→PM within same day).
+  if (inAM) {
+    const cur = _amHighPerDay.get(today) ?? -Infinity;
+    if (last.high > cur) _amHighPerDay.set(today, last.high);
+  }
+
   const signals = [];
 
-  const e50  = ema(closes, 50);
-  const e200 = ema(closes, 200);
-
-  // 20-bar Donchian channel (excludes current bar — highestHighPrev/lowestLowPrev use prev bars only)
-  const hi20 = highestHighPrev(bars, 20);
-  const lo20 = lowestLowPrev(bars, 20);
-  if (hi20 === null || lo20 === null) return [];
-
-  const volAvg20 = volumeSMA(bars, 20);
-  if (!volAvg20) return [];
-
-  const prev = bars[bars.length - 2];
-  const c   = last.close;
-  const vol = last.volume;
-
-  // NQ_DONCHIAN_BO_L: breakout long above 20-bar high
-  if (c > hi20 && vol > 1.5 * volAvg20 && c > e50 && c > e200) {
-    signals.push({
-      id:      "NQ_DONCHIAN_BO_L",
-      side:    "long",
-      price:   c,
-      tpTicks: 110,   // 27.5pts = $550/ct — optimized 2026-08-01 (vs 100t: +$728/yr)
-    });
-  }
-
-  // NQ_DONCHIAN_BO_S: breakout short below 20-bar low
-  if (c < lo20 && vol > 1.5 * volAvg20 && c < e50 && c < e200) {
-    signals.push({
-      id:       "NQ_DONCHIAN_BO_S",
-      side:     "short",
-      price:    c,
-      tpTicks:  110,   // 27.5pts = $550/ct — optimized 2026-08-01 (vs 100t: +$728/yr)
-    });
-  }
-
-  // ─── NQ BB_SQUEEZE_L / NQ_BB_SQUEEZE_S ───────────────────────────────────
-  // BB expansion breakout: fires when BB is expanding (not contracting) and price
-  // closes above/below the band for the first time, with volume confirmation.
-  // Tight 10t stop ($50/ct) — most trades are stopped quickly; 21%WR, avg win $483.
-  const bbNow  = bollingerBands(closes.slice(-30), 20, 2);
-  const bbPrev = bollingerBands(closes.slice(-31, -1), 20, 2);
-  if (bbNow && bbPrev && volAvg20) {
-    const bbNowW  = bbNow.upper  - bbNow.lower;
-    const bbPrevW = bbPrev.upper - bbPrev.lower;
-    const contracting = bbNowW < bbPrevW * 0.9;  // BB squeezing — wait for expansion
-
-    if (!contracting && vol > volAvg20 * 1.2) {
-      if (c > bbNow.upper && prev.close < bbNow.upper && c > e200) {
-        signals.push({
-          id:        "NQ_BB_SQUEEZE_L",
-          side:      "long",
-          price:     c,
-          tpTicks:   110,   // $550/ct
-          stopTicks: 10,    // $50/ct tight stop — overrides CFG.stopTicks=40
-        });
-      }
-      if (c < bbNow.lower && prev.close > bbNow.lower && c < e200) {
-        signals.push({
-          id:        "NQ_BB_SQUEEZE_S",
-          side:      "short",
-          price:     c,
-          tpTicks:   110,   // $550/ct
-          stopTicks: 10,    // $50/ct tight stop — overrides CFG.stopTicks=40
-        });
+  // ─── NQ_OB_FADE_L / NQ_OB_FADE_S — Opening Bar Fade ─────────────────────────
+  // The 13:30 opening 5m bar sometimes makes an extreme move. Fade it.
+  // v52-full: short surge ≥15t, TP 48t. Engine starts at 13:45 so check retroactively.
+  if (inAM) {
+    const needL = !_obFiredL.has(today);
+    const needS = !_obFiredS.has(today);
+    if (needL || needS) {
+      const ob = bars.find(b => barDate(b.time) === today && barHM(b.time) === AM_OPEN_HM);
+      if (ob) {
+        const move = ob.close - ob.open;
+        if (needL && move <= -(20 * TICK)) {
+          _obFiredL.add(today);
+          signals.push({ id: 'NQ_OB_FADE_L', side: 'long',  price: c, stopTicks: 12, tpTicks: 80, stopType: 'fixed', ignoreTrendFilter: true });
+        }
+        if (needS && move >= (10 * TICK)) {
+          _obFiredS.add(today);
+          signals.push({ id: 'NQ_OB_FADE_S', side: 'short', price: c, stopTicks: 12, tpTicks: 80, stopType: 'fixed', ignoreTrendFilter: true });
+        }
       }
     }
   }
 
-  // ─── NQ_VWAP_TOUCH_L / NQ_VWAP_TOUCH_S ──────────────────────────────────────
-  // Three-VWAP scalp: price departs VWAP by ≥10t, returns to it with a volume spike.
-  // Fires on whichever VWAP (Day/London/US session) triggers first per direction.
-  // Gate: Thu/Fri only — Mon–Wed showed negative expectancy in 2022-2026 backtest.
-  // Stop: 10t ($50/ct)  TP: 12t ($60/ct)  WR: 60% Thu/Fri (2022-2026, 2ct NQ)
-  // Volume proxy: current bar ≥ 1.4× 20-bar session avg (Bookmap absorption stand-in)
-  do {
-    const dow = new Date(last.time * 1000).getUTCDay();
-    if (dow !== 4 && dow !== 5) break; // Thu=4, Fri=5 only
-
-    // Volume spike: compare against last 20 session bars
-    const sessionVols = bars
-      .filter(b => { const bh = new Date(b.time*1000).getUTCHours()*100 + new Date(b.time*1000).getUTCMinutes(); return (bh >= 1330 && bh < 1500) || (bh >= 1800 && bh < 2000); })
-      .slice(-20);
-    const volAvgSess = sessionVols.length > 5 ? sessionVols.reduce((s, b) => s + b.volume, 0) / sessionVols.length : 0;
-    if (volAvgSess === 0 || last.volume < volAvgSess * 1.4) break;
-
-    // ADX trend filter
-    const adxVal = adx(bars.slice(-80), 14);
-    if (!adxVal || adxVal < 25) break;
-
-    // EMA200 slope for directional bias
-    const e200     = ema(closes, 200);
-    const e200prev = ema(closes.slice(0, -5), 200);
-    if (!e200 || !e200prev) break;
-    const biasLong = e200 > e200prev;
-
-    // VWAP anchor timestamps for today
-    const todayMidnight = (() => { const t = new Date(last.time*1000); t.setUTCHours(0,0,0,0); return t.getTime()/1000; })();
-    const anchors = [
-      { label: 'day',    ts: (() => { const t = new Date(last.time*1000); t.setUTCHours(23,0,0,0); if (t.getTime()/1000 > last.time) t.setUTCDate(t.getUTCDate()-1); return t.getTime()/1000; })() },
-      { label: 'london', ts: todayMidnight + 8*3600 },
-      { label: 'us',     ts: todayMidnight + 13*3600 + 30*60 },
-    ];
-
-    const TICK_SZ = 0.25, TOUCH_T = 2, DEPART_T = 10;
-    const prev = bars[bars.length - 2];
-    if (!prev) break;
-
-    for (const { label, ts } of anchors) {
-      if (ts > last.time) continue; // anchor not reached yet
-
-      // Compute VWAP from anchor
-      let pv = 0, vv = 0;
-      for (const b of bars) {
-        if (b.time < ts) continue;
-        const tp = (b.high + b.low + b.close) / 3;
-        pv += tp * b.volume; vv += b.volume;
+  // ─── NQ_AM_VWAP_FADE_L / NQ_AM_VWAP_FADE_S — AM Session VWAP Fade ───────────
+  // v52-full: short dev ≥25t, TP 48t. 1L+1S per day.
+  if (inAM) {
+    const vwap = sessionVWAP(bars, today, AM_OPEN_HM, AM_CLOSE_HM);
+    if (vwap !== null) {
+      const devT = (c - vwap) / TICK;
+      if (!_amVwapFiredL.has(today) && devT <= -40) {
+        _amVwapFiredL.add(today);
+        signals.push({ id: 'NQ_AM_VWAP_FADE_L', side: 'long',  price: c, stopTicks: 6, tpTicks: 72, stopType: 'fixed', ignoreTrendFilter: true });
       }
-      if (vv === 0) continue;
-      const vwapVal = pv / vv;
-
-      // Touch detection: last bar within TOUCH_T ticks, prev bar outside
-      const lastDist = (last.close - vwapVal) / TICK_SZ;
-      const prevDist = (prev.close - vwapVal) / TICK_SZ;
-      if (Math.abs(lastDist) > TOUCH_T) continue;
-      if (Math.abs(prevDist) <= TOUCH_T) continue; // prev also at VWAP — no clear cross
-
-      const isLong = prevDist < -TOUCH_T; // came from below → long bounce
-      if (isLong && !biasLong)  continue;
-      if (!isLong && biasLong)  continue;
-
-      // Departure check: price must have moved ≥ DEPART_T ticks from VWAP before returning
-      const anchorBars = bars.filter(b => b.time >= ts && b.time < last.time);
-      const maxDep = anchorBars.reduce((mx, b) => Math.max(mx, Math.abs(b.close - vwapVal) / TICK_SZ), 0);
-      if (maxDep < DEPART_T) continue;
-
-      // First-touch check: no prior touch in this direction since anchor
-      let priorTouch = false;
-      for (let k = 1; k < anchorBars.length; k++) {
-        const bk = anchorBars[k], bkp = anchorBars[k-1];
-        const bkDist  = Math.abs(bk.close  - vwapVal) / TICK_SZ;
-        const bkpDist = (bkp.close - vwapVal) / TICK_SZ;
-        const bkDir   = bkpDist < -TOUCH_T ? true : bkpDist > TOUCH_T ? false : null;
-        if (bkDist <= TOUCH_T && bkDir === isLong) { priorTouch = true; break; }
-      }
-      if (priorTouch) continue;
-
-      signals.push({
-        id:        isLong ? "NQ_VWAP_TOUCH_L" : "NQ_VWAP_TOUCH_S",
-        side:      isLong ? "long" : "short",
-        price:     last.close,
-        tpTicks:   12,
-        stopTicks: 10,
-        _vwap:     label, // diagnostic only
-      });
-      break; // one signal per bar (first VWAP that qualifies)
-    }
-  } while (false);
-
-  // ─── NQ_ORB_L / NQ_ORB_S — Opening Range Breakout ───────────────────────────
-  // OR = first 3 five-minute bars (13:30–13:45 UTC). Engine only evaluates from 13:45
-  // onwards, so on the first call we scan back to compute OR high/low lazily.
-  // One trade per day — long if first breakout is above OR high, short below OR low.
-  do {
-    const lastD  = new Date(last.time * 1000);
-    const lastHM = lastD.getUTCHours() * 100 + lastD.getUTCMinutes();
-    if (lastHM < 1345 || lastHM >= 1500) break; // AM only, after OR window closes
-
-    const today = lastD.toISOString().slice(0, 10);
-
-    // Lazily build OR from the 13:30/13:35/13:40 bars in the history window
-    if (!_orbState.has(today)) {
-      const orBars = bars.filter(b => {
-        const bd = new Date(b.time * 1000);
-        const bh = bd.getUTCHours() * 100 + bd.getUTCMinutes();
-        return bd.toISOString().slice(0, 10) === today && bh >= 1330 && bh < 1345;
-      });
-      if (orBars.length < 3) break; // OR not complete — skip until bars arrive
-      _orbState.set(today, {
-        high:  Math.max(...orBars.map(b => b.high)),
-        low:   Math.min(...orBars.map(b => b.low)),
-        fired: false,
-      });
-    }
-
-    const orb = _orbState.get(today);
-    if (!orb || orb.fired || !prev) break;
-
-    // Long breakout: first close above OR high
-    if (prev.close <= orb.high && c > orb.high) {
-      orb.fired = true;
-      signals.push({
-        id:        "NQ_ORB_L",
-        side:      "long",
-        price:     c,
-        stopTicks: 8,   // $40/ct
-        tpTicks:   20,  // $100/ct — 2.5:1 R:R (backtest optimal)
-        barHigh:   last.high,
-        barLow:    last.low,
-      });
-    }
-    // Short breakout: first close below OR low
-    else if (prev.close >= orb.low && c < orb.low) {
-      orb.fired = true;
-      signals.push({
-        id:        "NQ_ORB_S",
-        side:      "short",
-        price:     c,
-        stopTicks: 8,   // $40/ct
-        tpTicks:   20,  // $100/ct — 2.5:1 R:R
-        barHigh:   last.high,
-        barLow:    last.low,
-      });
-    }
-  } while (false);
-
-  // ─── CONF_TREND_L / CONF_TREND_S — Confirmed Session Continuation ────────────
-  // Backtest (2020-2026, 5m signal / 1m exit, 2ct, gate-realistic):
-  //   CONF_TREND_L: 31% WR  +$37,520 total  +$19/tr
-  //   CONF_TREND_S: 30% WR  +$54,640 total  +$17/tr
-  //   Fixed TP 24t / Stop 8t (3:1 R:R) — trail exit was cutting winners short (-$19/tr)
-  //
-  // Entry: session is already moving in one direction (≥15t push from open) →
-  //   price breaks local 3-bar high/low (confirms continuation) → volume ≥1.2× avg.
-  //   Fixed TP 24t ($120/ct), stop 8t ($40/ct). One entry per push event.
-  const TREND_PUSH_T  = 15;  // min session push to qualify (ticks from open)
-  const TREND_VOL     = 1.2; // volume multiplier threshold
-  const TREND_STOP_T  = 8;   // stop distance in ticks ($40/ct)
-  const TREND_TP_T    = 24;  // fixed TP: 24t = $120/ct (3:1 R:R)
-
-  if (bars.length >= 214) {
-    const { sk: skT, sess: sessT } = _updateSess(last);
-
-    if (sessT.bars >= 4) {
-      const closes14T = bars.map(b => b.close);
-      const r14T      = rsi(closes14T, 14);
-
-      // Re-arm when price returns near session open
-      if (Math.abs(last.close - sessT.open) / 0.25 < 5) {
-        _sessArmed.delete(skT + "_TL");
-        _sessArmed.delete(skT + "_TS");
-      }
-
-      const maxUpT   = Math.round((sessT.high  - sessT.open) / 0.25);
-      const maxDownT = Math.round((sessT.open  - sessT.low)  / 0.25);
-
-      const lh3 = Math.max(prev.high, bars[bars.length - 3].high, bars[bars.length - 4].high);
-      const ll3 = Math.min(prev.low,  bars[bars.length - 3].low,  bars[bars.length - 4].low);
-
-      // CONF_TREND_L: session pushed UP → confirm continuation long
-      if (maxUpT >= TREND_PUSH_T &&
-          c > lh3 &&
-          vol >= volAvg20 * TREND_VOL &&
-          last.close > last.open &&
-          r14T !== null && r14T > 30 && r14T < 75 &&
-          !_sessArmed.get(skT + "_TL")) {
-        _sessArmed.set(skT + "_TL", true);
-        signals.push({
-          id:        "CONF_TREND_L",
-          side:      "long",
-          price:     c,
-          stopTicks: TREND_STOP_T,
-          tpTicks:   TREND_TP_T,
-          barHigh:   last.high,
-          barLow:    last.low,
-        });
-      }
-
-      // CONF_TREND_S: session pushed DOWN → confirm continuation short
-      if (maxDownT >= TREND_PUSH_T &&
-          c < ll3 &&
-          vol >= volAvg20 * TREND_VOL &&
-          last.close < last.open &&
-          r14T !== null && r14T < 70 && r14T > 25 &&
-          !_sessArmed.get(skT + "_TS")) {
-        _sessArmed.set(skT + "_TS", true);
-        signals.push({
-          id:        "CONF_TREND_S",
-          side:      "short",
-          price:     c,
-          stopTicks: TREND_STOP_T,
-          tpTicks:   TREND_TP_T,
-          barHigh:   last.high,
-          barLow:    last.low,
-        });
+      if (!_amVwapFiredS.has(today) && devT >= 15) {
+        _amVwapFiredS.add(today);
+        signals.push({ id: 'NQ_AM_VWAP_FADE_S', side: 'short', price: c, stopTicks: 6, tpTicks: 72, stopType: 'fixed', ignoreTrendFilter: true });
       }
     }
   }
 
-  // ─── CONF_REV_L / CONF_REV_S — Confirmed Session Reversal ────────────────────
-  // Backtest (2020-2026, 5m signal / 1m exit, 2ct, gate-realistic):
-  //   CONF_REV_L: 30% WR  +$8,580 total  +$13/tr
-  //   CONF_REV_S: 33% WR  +$19,200 total  +$20/tr
-  //   Fixed TP 18t / Stop 6t (3:1 R:R) — trail exit was cutting winners short
-  //
-  // Entry requires ALL of:
-  //   1. Session had an initial push ≥ 15 ticks from session open in one direction
-  //   2. Price proves the reversal by closing above/below the prior 3-bar local high/low
-  //   3. Volume confirms: current bar ≥ 1.2× 20-bar avg (real participation, not noise)
-  //   4. One entry per push event — re-arms when price returns within 5t of session open
-  //   5. RSI not extreme (30-65 for longs, 35-70 for shorts)
-  const CONF_PUSH_T = 15;   // min initial push in ticks
-  const CONF_VOL    = 1.2;  // volume multiplier threshold
-  const CONF_STOP_T = 6;    // stop distance in ticks ($30/ct)
-  const CONF_TP_T   = 18;   // fixed TP: 18t = $90/ct (3:1 R:R)
-
-  if (bars.length >= 214) {  // need extra bars for 4-bar lookback + session warmup
-    const { sk, sess } = _updateSess(last);
-
-    if (sess.bars >= 4) {
-      const closes14 = bars.map(b => b.close);
-      const r14      = rsi(closes14, 14);
-
-      // Re-arm when price returns near session open (new push could form)
-      if (Math.abs(last.close - sess.open) / 0.25 < 5) {
-        _sessArmed.delete(sk + "_L");
-        _sessArmed.delete(sk + "_S");
+  // ─── NQ_ADR_FADE_L / NQ_ADR_FADE_S — ADR Exhaustion Fade ────────────────────
+  // v52-full: ≥60% of 20-day ADR from AM open, TP 32t. 1L+1S per day.
+  if (inAM) {
+    const adr    = calcADR20(today);
+    const amOpen = amSessionOpen(bars, today);
+    if (adr !== null && amOpen !== null) {
+      const move   = c - amOpen;
+      const thresh = adr * 0.35;
+      if (!_adrFiredL.has(today) && move <= -thresh) {
+        _adrFiredL.add(today);
+        signals.push({ id: 'NQ_ADR_FADE_L', side: 'long',  price: c, stopTicks: 6, tpTicks: 80, stopType: 'fixed', ignoreTrendFilter: true });
       }
-
-      const maxDown = Math.round((sess.open - sess.low)  / 0.25);  // ticks dropped from open
-      const maxUp   = Math.round((sess.high  - sess.open) / 0.25); // ticks risen from open
-
-      // Local 3-bar high/low (prior 3 bars, not current) for direction-change proof
-      const localHigh = Math.max(prev.high, bars[bars.length - 3].high, bars[bars.length - 4].high);
-      const localLow  = Math.min(prev.low,  bars[bars.length - 3].low,  bars[bars.length - 4].low);
-
-      // CONF_REV_L: session pushed down ≥15t → price now breaks local high with volume
-      if (maxDown >= CONF_PUSH_T &&
-          c > localHigh &&
-          vol >= volAvg20 * CONF_VOL &&
-          last.close > last.open &&
-          r14 !== null && r14 > 30 && r14 < 65 &&
-          !_sessArmed.get(sk + "_L")) {
-        _sessArmed.set(sk + "_L", true);
-        signals.push({
-          id:        "CONF_REV_L",
-          side:      "long",
-          price:     c,
-          stopTicks: CONF_STOP_T,
-          tpTicks:   CONF_TP_T,
-          barHigh:   last.high,
-          barLow:    last.low,
-        });
-      }
-
-      // CONF_REV_S: session pushed up ≥15t → price now breaks local low with volume
-      if (maxUp >= CONF_PUSH_T &&
-          c < localLow &&
-          vol >= volAvg20 * CONF_VOL &&
-          last.close < last.open &&
-          r14 !== null && r14 < 70 && r14 > 35 &&
-          !_sessArmed.get(sk + "_S")) {
-        _sessArmed.set(sk + "_S", true);
-        signals.push({
-          id:        "CONF_REV_S",
-          side:      "short",
-          price:     c,
-          stopTicks: CONF_STOP_T,
-          tpTicks:   CONF_TP_T,
-          barHigh:   last.high,
-          barLow:    last.low,
-        });
+      if (!_adrFiredS.has(today) && move >= thresh) {
+        _adrFiredS.add(today);
+        signals.push({ id: 'NQ_ADR_FADE_S', side: 'short', price: c, stopTicks: 6, tpTicks: 80, stopType: 'fixed', ignoreTrendFilter: true });
       }
     }
   }
+
+  // ─── NQ_14H_REV_S — 14:00 UTC Reversal Short ─────────────────────────────────
+  // v52-full: short only, ≥40t above AM open after 14:00, TP 32t.
+  // SINGLE gate: 1 trade/day total.
+  if (inAM && hm >= 1400 && !_14hRevDate.has(today)) {
+    const amOpen = amSessionOpen(bars, today);
+    if (amOpen !== null) {
+      const moveT = (c - amOpen) / TICK;
+      if (moveT >= 25) {
+        _14hRevDate.add(today);
+        signals.push({ id: 'NQ_14H_REV_S', side: 'short', price: c, stopTicks: 6, tpTicks: 80, stopType: 'fixed', ignoreTrendFilter: true });
+      } else if (moveT <= -25) {
+        // Long side tombstoned — consume the gate so it doesn't fire twice
+        _14hRevDate.add(today);
+      }
+    }
+  }
+
+  // ─── NQ_FIRST30_FADE_L / NQ_FIRST30_FADE_S — First-30-Min Range Fade ─────────
+  // After 14:00 UTC: close breaks above all prior AM highs → short reversal.
+  // v52-full: TP 32t. 1L+1S per day.
+  if (inAM && hm >= 1400) {
+    const priorAM = bars.filter(b => barDate(b.time) === today && barHM(b.time) >= AM_OPEN_HM && b.time < last.time);
+    if (priorAM.length >= 6) {
+      const amLow  = Math.min(...priorAM.map(b => b.low));
+      const amHigh = Math.max(...priorAM.map(b => b.high));
+      if (!_first30FiredL.has(today) && c < amLow) {
+        _first30FiredL.add(today);
+        signals.push({ id: 'NQ_FIRST30_FADE_L', side: 'long',  price: c, stopTicks: 6, tpTicks: 40, stopType: 'fixed', ignoreTrendFilter: true });
+      }
+      if (!_first30FiredS.has(today) && c > amHigh) {
+        _first30FiredS.add(today);
+        signals.push({ id: 'NQ_FIRST30_FADE_S', side: 'short', price: c, stopTicks: 6, tpTicks: 40, stopType: 'fixed', ignoreTrendFilter: true });
+      }
+    }
+  }
+
+  // ─── NQ_OVERNIGHT_TRAP_S — Overnight Gap Trap Short ─────────────────────────
+  // AM session gapped up ≥50t vs prior day's close and price has faded back below
+  // the AM open → the gap was a bull trap, short the fade. First 30min of AM only.
+  // v52-full: TP 48t, fires at most once per day.
+  if (inAM && hm <= 1400 && !_onTrapFiredS.has(today)) {
+    const amOpen = amSessionOpen(bars, today);
+    const pClose = prevDayClose(bars, today);
+    if (amOpen !== null && pClose !== null) {
+      const gapT = (amOpen - pClose) / TICK;
+      if (gapT >= 20 && c < amOpen) {
+        _onTrapFiredS.add(today);
+        signals.push({ id: 'NQ_OVERNIGHT_TRAP_S', side: 'short', price: c, stopTicks: 6, tpTicks: 80, stopType: 'fixed', ignoreTrendFilter: true });
+      }
+    }
+  }
+
+  // ─── NQ_PM_VWAP_FADE_L / NQ_PM_VWAP_FADE_S — PM Session VWAP Fade ───────────
+  // v52-full: short dev ≥25t, TP 48t. 1L+1S per day.
+  if (inPM) {
+    const vwap = sessionVWAP(bars, today, PM_OPEN_HM, PM_CLOSE_HM);
+    if (vwap !== null) {
+      const devT = (c - vwap) / TICK;
+      if (!_pmVwapFiredL.has(today) && devT <= -40) {
+        _pmVwapFiredL.add(today);
+        signals.push({ id: 'NQ_PM_VWAP_FADE_L', side: 'long',  price: c, stopTicks: 6, tpTicks: 48, stopType: 'fixed', ignoreTrendFilter: true });
+      }
+      if (!_pmVwapFiredS.has(today) && devT >= 15) {
+        _pmVwapFiredS.add(today);
+        signals.push({ id: 'NQ_PM_VWAP_FADE_S', side: 'short', price: c, stopTicks: 6, tpTicks: 48, stopType: 'fixed', ignoreTrendFilter: true });
+      }
+    }
+  }
+
+  // NQ_SESSION_HIGH_FAIL_S — DISABLED V5.5 (negative Jun–Sep 2026, re-evaluate Dec 2026)
+
+  // NQ_BEAR_MOMENTUM_S — disabled 2026-09-18 (SL structurally too wide, r=0.175)
 
   return signals;
 };

@@ -21,11 +21,63 @@ import dotenv from "dotenv";
 import { evaluate, evaluateExtended } from "./strategies.js";
 import { evaluateNQ, resetConfRevState } from "./nq-strategies.js";
 import { atr, volumeSMA } from "./indicators.js";
-import { appendFileSync, writeFileSync, mkdirSync, existsSync, readFileSync } from "fs";
+import { appendFileSync, writeFileSync, openSync, closeSync, unlinkSync, mkdirSync, existsSync, readFileSync } from "fs";
+import { execSync } from "child_process";
 import { resolve, dirname, join } from "path";
 import { fileURLToPath } from "url";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
+
+// ── Per-account engine singleton lockfile ─────────────────────────────────────
+// Prevents a second engine from running for the same account ID if a supervisor
+// crashes and orphans a child — the new supervisor's spawn attempt is blocked here.
+{
+  const accountId  = process.env.ACCOUNT_ID || process.env.TV_USER || 'default';
+  const safeId     = String(accountId).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40);
+  const logsDir    = resolve(__dir, '..', 'logs');
+  mkdirSync(logsDir, { recursive: true });
+  const engineLock = resolve(logsDir, `engine-${safeId}.lock`);
+
+  const acquireEngineLock = () => {
+    try {
+      const fd = openSync(engineLock, 'wx');
+      writeFileSync(fd, String(process.pid));
+      closeSync(fd);
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      const existingPid = parseInt(readFileSync(engineLock, 'utf8').trim(), 10);
+      let alive = true;
+      try { process.kill(existingPid, 0); } catch { alive = false; }
+      if (alive) {
+        console.error(`\n❌  Engine for account ${safeId} already running (PID ${existingPid}). Exiting.\n`);
+        process.exit(1);
+      }
+      // Stale — remove and retry once
+      unlinkSync(engineLock);
+      try {
+        const fd = openSync(engineLock, 'wx');
+        writeFileSync(fd, String(process.pid));
+        closeSync(fd);
+      } catch {
+        console.error(`\n❌  Engine lock race for ${safeId} — another engine won. Exiting.\n`);
+        process.exit(1);
+      }
+    }
+    const release = () => { try { unlinkSync(engineLock); } catch {} };
+    process.on('exit',   release);
+    process.on('SIGINT',  () => { release(); process.exit(1); });
+    process.on('SIGTERM', () => { release(); process.exit(1); });
+    // Catch leaked async errors — prevents Node 15+ from crashing the process on
+    // unhandled rejections (e.g. from SignalR's internal promise chains on disconnect).
+    process.on('unhandledRejection', (reason) => {
+      console.error('[Engine] Unhandled rejection (non-fatal):', reason instanceof Error ? reason.message : reason);
+    });
+    process.on('uncaughtException', (err) => {
+      console.error('[Engine] Uncaught exception (non-fatal):', err.message);
+    });
+  };
+  acquireEngineLock();
+}
 
 // Shared state file — read by cl-forward-test.mjs to gate signals
 const SHARED_STATE_PATH = join(__dir, "..", "logs", "nq-state.json");
@@ -340,7 +392,8 @@ function logWeeklySummary(record) {
 // V3 signals (2026-08-02 quant rebuild — see strategies.js header for methodology)
 // NQ_BB_SQUEEZE_L/S are NQ-only signals from nq-strategies.js — must be in this list
 // or they bypass the ENABLED_STRATEGIES whitelist filter entirely.
-const ACTIVE_STRATEGIES = ["DONCH15_L","VOLBO_L","VOLBO_S","EMA21_PULL_L","BO10_S","3BAR_BEAR_S","KELT_L","NQ_BB_SQUEEZE_L","NQ_BB_SQUEEZE_S","NQ_DONCHIAN_BO_L","NQ_DONCHIAN_BO_S","NQ_VWAP_TOUCH_L","NQ_VWAP_TOUCH_S","CONF_TREND_L","CONF_TREND_S","CONF_REV_L","CONF_REV_S","NQ_ORB_L","NQ_ORB_S"];
+// V5 NQ signals (Portfolio V5, 2026-09-10 quant rebuild — see nq-strategies.js header for methodology)
+const ACTIVE_STRATEGIES = ["DONCH15_L","VOLBO_L","VOLBO_S","EMA21_PULL_L","BO10_S","3BAR_BEAR_S","KELT_L","NQ_OB_FADE_L","NQ_OB_FADE_S","NQ_AM_VWAP_FADE_L","NQ_AM_VWAP_FADE_S","NQ_ADR_FADE_L","NQ_ADR_FADE_S","NQ_14H_REV_S","NQ_FIRST30_FADE_L","NQ_FIRST30_FADE_S","NQ_PM_VWAP_FADE_L","NQ_PM_VWAP_FADE_S","NQ_OVERNIGHT_TRAP_S"];
 function buildUserDisabledStrategies() {
   const env = process.env.ENABLED_STRATEGIES;
   if (!env) return [];
@@ -422,7 +475,23 @@ const CFG = {
     "VOL_CLIMAX_S", "EXHST_S", "BEARISH_FVG_S", "BODY_ENGULF_S", "TRAP_S",
     "E200_REJ_S", "ORB_L", "MACD_FAN_S", "VWAP_RECLAIM_L", "MARKET_STRUCT_S",
     "DAY_BREAK_FAIL_S", "EXHAUST_CONT_S", "PIVOT_R1_S",
-    // ── Active V3 signals (none paused) ──
+    // ── NQ V2 tombstones (replaced by Portfolio V5 on 2026-09-10) ────────────
+    // These IDs are no longer emitted by nq-strategies.js. Kept here so the paused
+    // filter prevents accidental execution if nq-strategies.js is ever rolled back.
+    "NQ_BB_SQUEEZE_L", "NQ_BB_SQUEEZE_S", "NQ_DONCHIAN_BO_L", "NQ_DONCHIAN_BO_S",
+    "NQ_VWAP_TOUCH_L", "NQ_VWAP_TOUCH_S", "CONF_TREND_L", "CONF_TREND_S",
+    "CONF_REV_L", "CONF_REV_S", "NQ_ORB_L", "NQ_ORB_S", "NQ_DIV_L", "NQ_DIV_S",
+    // ── V5 long fades disabled 2026-09-14 ──────────────────────────────────
+    // 7.5-year backtest (2019–2026) showed long fades net-negative vs shorts-only.
+    // Shorts-only: +$719K ($93K/yr at 4ct). All long fades combined: -$56K drag.
+    // NQ_14H_REV_S: short only (long side tombstoned with other fades 2026-09-14).
+    "NQ_OB_FADE_L", "NQ_AM_VWAP_FADE_L", "NQ_ADR_FADE_L", "NQ_PM_VWAP_FADE_L", "NQ_FIRST30_FADE_L",
+    // ── Active V5.5 shorts (regime overfit Jun–Sep 2026, deployed 2026-09-20) ──
+    // NQ_OB_FADE_S, NQ_AM_VWAP_FADE_S, NQ_ADR_FADE_S,
+    // NQ_14H_REV_S, NQ_FIRST30_FADE_S, NQ_PM_VWAP_FADE_S,
+    // NQ_OVERNIGHT_TRAP_S
+    // NQ_SESSION_HIGH_FAIL_S — disabled V5.5 (negative Jun–Sep 2026)
+    // ── Active ES/V3 signals (none paused) ──
     // DONCH15_L, VOLBO_L, VOLBO_S, EMA21_PULL_L, BO10_S, 3BAR_BEAR_S, KELT_L
     // Additional strategies disabled by user config (ENABLED_STRATEGIES env var)
     ...buildUserDisabledStrategies(),
@@ -462,21 +531,17 @@ const CFG = {
 
 // ─── NQ Instrument Overrides ──────────────────────────────────────────────────
 // Applied immediately when SYMBOL=NQ — overrides ES defaults before any trading logic runs.
-// NQ tick: $5/tick, 0.25pt. Default stop=40t ($200/ct), TP=110t ($550/ct).
-// CFG.stopTicks=40 is the default — NQ_BB_SQUEEZE overrides to 10t via sig.stopTicks.
-// Portfolio (2020-2026): Donchian L+S $12,870/yr + BB_SQUEEZE L+S $15,521/yr = $15,896/yr combined
-//   23.7 tr/mo | 31%WR | max DD -$4,580 | positive every year 2020-2026
+// NQ tick: $5/tick, 0.25pt. V5 signals each specify their own stop (8t) and TP (28-40t).
+// Portfolio V5 (2020-2026): $978K | 68%WR | $102/tr | ~$140K/yr | WFO OOS 106% of IS
 if (CFG.contractSearch === "NQ") {
   CFG.tickValue  = 5.00;        // $5/tick vs ES $12.50
-  CFG.tpTicks    = 110;         // 27.5pt TP default for NQ strategies (optimized 2026-08-01)
-  CFG.stopTicks  = 40;          // 10pt fixed stop (40t @ $5 = $200/ct)
-  // maxStopTicks: accounts.json MAX_STOP_TICKS=40 takes priority; only fall back to 60 if unset.
-  // Hardcoding 60 here was overriding the accounts.json cap, defeating the safety fix.
+  // V5: tpTicks and stopTicks are NOT set here — every V5 signal specifies its own
+  //     stopTicks (8t) and tpTicks (28-40t) in the signal object. CFG defaults are
+  //     only used when sig.stopTicks / sig.tpTicks are absent (legacy fallback).
+  // maxStopTicks: accounts.json MAX_STOP_TICKS takes priority; only fall back to 60 if unset.
   if (!process.env.MAX_STOP_TICKS) CFG.maxStopTicks = 60;
-  // Trail ticks unchanged (8t trail still applies if any NQ strategy uses trail mode)
-  // Clear ES-specific V2 tombstones from pausedStrategies, then re-apply ENABLED_STRATEGIES
-  // filter for NQ-specific signals (NQ_BB_SQUEEZE_L/S). Without the re-apply, the
-  // ENABLED_STRATEGIES whitelist has no effect on NQ accounts.
+  // Clear ES-specific tombstones from pausedStrategies, then re-apply ENABLED_STRATEGIES
+  // filter for NQ-specific signals. Without the re-apply the whitelist has no effect on NQ.
   CFG.pausedStrategies.length = 0;
   CFG.pausedStrategies.push(...buildUserDisabledStrategies());
   CFG.forwardTestStrategies.clear();
@@ -525,6 +590,8 @@ const state = {
 
   bars:               [],           // normalised OHLCV 5m bars
   bars15:             [],           // normalised OHLCV 15m bars
+  esBars:             [],           // ES 5m bars for NQ_DIV divergence signal
+  esContractId:       null,         // resolved at boot, used for ES bar fetches
 
   activeDirections:   new Set(),    // "long" | "short" — direction gate (SHARED by 5m + 15m)
   openTrades:         new Map(),    // orderId → { signalId, isLong }
@@ -540,11 +607,14 @@ const state = {
   sessionLongCount:   0,   // longs entered today (used for 2nd-long-after-win gate)
   sessionLongWon:     false, // true once a long TP fires today — unlocks 2nd long bypass
   upPctOverbought:    false, // true when ≥ 8 of last 10 days closed up — suppresses trending strats
-  haltedToday:        false,
-  profitCappedToday:  false,
-  runnerClosePending: false,  // true once runner-close market order has been sent (dedup guard)
+  haltedToday:             false,
+  profitCappedToday:       false,
+  briefSentToday:          false,
+  runnerClosePending:      false,  // true once runner-close market order has been sent (dedup guard)
+  combineTargetNotified:   false,  // true once combine target push notification has fired
   balance:            null,   // live account balance (updated on every account event)
   startOfDayBalance:  null,   // balance at 13:30 UTC reset — used for API reconciliation
+  dayContextRecovered: false, // true after reconcileMissedTrades restores mid-day dayPnL
   peakBalance:        null,
   openPositionSize:   0,      // current open position size (updated by onPositionEvent)
   openPositionDir:    null,   // "long" | "short" | null
@@ -651,9 +721,9 @@ async function resolveContract() {
 }
 
 // ─── Historical bars ──────────────────────────────────────────────────────────
-async function fetchBars(limit = 300, partial = false) {
+async function fetchBars(limit = 300, partial = false, lookbackHours = 48) {
   const now   = new Date();
-  const start = new Date(now - 48 * 60 * 60 * 1000); // 48h back for overnight range
+  const start = new Date(now - lookbackHours * 60 * 60 * 1000); // default 48h; boot uses 720h (30 days)
 
   const data = await apiPost("/api/History/retrieveBars", {
     contractId:       state.contractId,
@@ -686,6 +756,18 @@ async function fetchBars(limit = 300, partial = false) {
   const latest = state.bars.at(-1);
   const latestStr = latest ? new Date(latest.time * 1000).toISOString() : "none (market closed/weekend)";
   console.log(`[Bars] ${state.bars.length} bars loaded (latest: ${latestStr})`);
+
+  // Bar stream log — write each confirmed-closed bar once for live vs backtest comparison
+  if (!partial && latest && latest.time > (state._lastLoggedBarTime ?? 0)) {
+    state._lastLoggedBarTime = latest.time;
+    const dateStr = new Date(latest.time * 1000).toISOString().slice(0, 10);
+    const logPath = resolve(__dir, '..', 'logs', `bar-stream-${dateStr}.jsonl`);
+    const entry   = JSON.stringify({
+      t: new Date(latest.time * 1000).toISOString(),
+      o: latest.open, h: latest.high, l: latest.low, c: latest.close, v: latest.volume,
+    });
+    try { appendFileSync(logPath, entry + '\n'); } catch {}
+  }
 }
 
 // Fetch 15-minute bars — separate store from the 5m bars
@@ -725,6 +807,46 @@ async function fetchBars15(limit = 300) {
   console.log(`[Bars15] ${state.bars15.length} bars loaded (latest: ${latestStr})`);
 }
 
+// ─── ES contract + bars (NQ_DIV signal dual-feed) ────────────────────────────
+async function resolveESContract() {
+  if (CFG.contractSearch !== "NQ") return; // only needed for NQ engine
+  try {
+    const data = await apiPost("/api/Contract/search", { searchText: "ES", live: !state.simulated });
+    if (!data.success) { console.warn("[ESContract] Search failed:", data.errorMessage); return; }
+    const contract = data.contracts.find(c => c.activeContract && c.name.startsWith("EP")) ||
+                     data.contracts.find(c => c.activeContract);
+    if (!contract) { console.warn("[ESContract] No active ES contract found"); return; }
+    state.esContractId = contract.id;
+    console.log(`[ESContract] ${contract.name} | id=${contract.id}`);
+  } catch (e) {
+    console.warn("[ESContract] Error resolving ES contract:", e.message);
+  }
+}
+
+async function fetchESBars() {
+  if (!state.esContractId) return;
+  const now   = new Date();
+  const start = new Date(now - 48 * 60 * 60 * 1000);
+  try {
+    const data = await apiPost("/api/History/retrieveBars", {
+      contractId:        state.esContractId,
+      live:              !state.simulated,
+      startTime:         start.toISOString(),
+      endTime:           now.toISOString(),
+      unit:              2,   // Minute
+      unitNumber:        5,   // 5-min bars
+      limit:             300,
+      includePartialBar: true,
+    });
+    if (!data.success) { console.warn("[ESBars] Failed:", data.errorMessage); return; }
+    state.esBars = data.bars
+      .map(b => ({ time: new Date(b.t).getTime() / 1000, open: +b.o, high: +b.h, low: +b.l, close: +b.c, volume: b.v }))
+      .sort((a, b) => a.time - b.time);
+  } catch (e) {
+    console.warn("[ESBars] Error fetching:", e.message);
+  }
+}
+
 // ─── SignalR Hub ──────────────────────────────────────────────────────────────
 async function connectHub() {
   state.hub = new HubConnectionBuilder()
@@ -749,8 +871,33 @@ async function connectHub() {
   state.hub.onreconnected(() => {
     console.log("[Hub] Reconnected — re-subscribing");
     subscribeHub().catch(console.error);
-    // Recover any trade close events that were dropped during the disconnect window
     reconcileMissedTrades().catch(console.error);
+  });
+
+  // When SignalR exhausts ALL reconnect attempts it calls onclosed and gives up.
+  // Without this handler the hub sits permanently dead — the engine keeps running
+  // but receives zero events. Re-login and reconnect from scratch so the engine
+  // stays live without needing a full process restart.
+  state.hub.onclose(async (err) => {
+    console.warn(`[Hub] ⚠️  Connection permanently closed${err ? `: ${err.message}` : ''} — reconnecting...`);
+    notify("⚠️ Hub reconnecting", "SignalR connection lost — reconnecting in 30s. No events until restored.", "high").catch(() => {});
+    let attempt = 0;
+    while (true) {
+      attempt++;
+      const delay = Math.min(30_000 * attempt, 300_000); // 30s, 60s, 90s … cap at 5min
+      await new Promise(r => setTimeout(r, delay));
+      try {
+        await login();
+        state.hub = null;
+        await connectHub();
+        console.log("[Hub] ✅ Full reconnect successful");
+        notify("✅ Hub reconnected", "SignalR connection restored.", "default").catch(() => {});
+        await reconcileMissedTrades();
+        return;
+      } catch (e) {
+        console.error(`[Hub] Reconnect attempt ${attempt} failed: ${e.message} — retrying in ${Math.min(30 * (attempt + 1), 300)}s`);
+      }
+    }
   });
 
   await state.hub.start();
@@ -849,9 +996,19 @@ function onTradeEvent(trade) {
   if (!trade) return;
   const pnl = trade.profitAndLoss ?? trade.pnl ?? 0;
 
-  // Mark this trade ID as seen so reconcileMissedTrades() won't re-process it
+  // Deduplicate — SignalR can replay queued events on reconnect at the same time
+  // reconcileMissedTrades() is processing the same trades via REST. Both call
+  // onTradeEvent; seenTradeIds guards against double-counting P&L.
   const tradeId = trade.id ?? trade.tradeId ?? null;
-  if (tradeId != null) { state.seenTradeIds.add(String(tradeId)); saveSeenTradeIds(); }
+  if (tradeId != null) {
+    const tid = String(tradeId);
+    if (state.seenTradeIds.has(tid)) {
+      console.log(`[Trade] Duplicate event for ${tid} — skipping (already processed)`);
+      return;
+    }
+    state.seenTradeIds.add(tid);
+    saveSeenTradeIds();
+  }
 
   // Skip voided trades — platform can void fills on bad ticks; voided P&L must not count
   if (trade.voided) {
@@ -860,9 +1017,21 @@ function onTradeEvent(trade) {
   }
 
   // Entry fills arrive as pnl=0 events; also a genuine breakeven close has pnl=0.
-  // We handle both: entry fills have no signalId context we care about; a real $0 close
-  // is so rare it is safe to log and return without updating the streak.
+  // TopstepX does NOT push P&L in SignalR trade events — profitAndLoss is always null,
+  // so closing fills (SL/TP hits) also arrive here with pnl=0. Detect them by checking
+  // if the orderId matches a known SL/TP order in openTrades, and if so trigger an
+  // immediate REST reconciliation to get the real P&L.
   if (pnl === 0) {
+    const closingOrderId = String(trade.orderId ?? trade.order_id ?? "");
+    const maybeClosing = closingOrderId ? state.openTrades.get(closingOrderId) : null;
+    if (maybeClosing?.isProtective) {
+      console.log(`[Trade] 🔍 Bracket fill (${maybeClosing.signalId}) — P&L missing from SignalR; reconciling REST in 3s`);
+      // Remove from seenTradeIds so reconcileMissedTrades can find and book this trade with real P&L
+      const tidStr = tradeId != null ? String(tradeId) : null;
+      if (tidStr) { state.seenTradeIds.delete(tidStr); saveSeenTradeIds(); }
+      setTimeout(() => reconcileMissedTrades().catch(() => {}), 3000);
+      return;
+    }
     console.log("[Trade] Flat P&L event — checking for unprotected fills");
     // GatewayUserOrder drops consistently — use this trade event as the PRIMARY
     // trigger for placing protective orders. Fires within seconds of fill.
@@ -912,6 +1081,18 @@ function onTradeEvent(trade) {
   // ── Persistent trade record (tax log) ─────────────────────────────────────
   // Section 1256 (ES futures): 60% LT / 40% ST capital gains — report on Form 6781
   const now = new Date();
+
+  // Slippage: positive = filled worse than signal price (adverse), negative = better
+  const sigPrice   = knownTrade?.sigPrice ?? null;
+  const entryFill  = trade.entryPrice ?? null;
+  const entrySlipT = (sigPrice != null && entryFill != null)
+    ? Math.round((resolvedIsLong ? entryFill - sigPrice : sigPrice - entryFill) / CFG.tickSize)
+    : null;
+  if (entrySlipT !== null && resolvedSignal !== "RECOVERED") {
+    const slipLabel = entrySlipT === 0 ? "exact" : entrySlipT > 0 ? `+${entrySlipT}t adverse` : `${entrySlipT}t favorable`;
+    console.log(`[Slip] ${resolvedSignal} ${dirLabel} — sig:${sigPrice?.toFixed(2)} fill:${entryFill?.toFixed(2)} → ${slipLabel}`);
+  }
+
   logTrade({
     timestamp:      now.toISOString(),
     date:           now.toISOString().slice(0, 10),
@@ -922,7 +1103,9 @@ function onTradeEvent(trade) {
     signal:         resolvedSignal,
     direction:      dirLabel,
     contracts:      knownTrade?.contracts ?? trade.contracts ?? "?",
-    entry_price:    trade.entryPrice  ?? null,
+    signal_price:   sigPrice,
+    entry_price:    entryFill,
+    entry_slip_ticks: entrySlipT,
     exit_price:     trade.exitPrice   ?? trade.price ?? null,
     gross_pnl:      +pnl.toFixed(2),
     balance_after:  state.balance     != null ? +state.balance.toFixed(2)     : null,
@@ -951,7 +1134,7 @@ function onTradeEvent(trade) {
     emitBundleEvent('TRADE_CLOSED', { win: true, pnl: +pnl.toFixed(2), signal: resolvedSignal, dir: dirLabel.toLowerCase(), contracts: knownTrade?.contracts ?? trade.contracts ?? 1 });
     notify(
       `✅ Winner +$${pnl.toFixed(0)}${recovTag}`,
-      `Day P&L: $${state.dayPnL.toFixed(0)}  |  Streak: ${state.consecutiveWins}W\nNext size: ${ct}ct`,
+      `[${(process.env.MARKET ?? "es").toUpperCase()}] ${resolvedSignal} ${dirLabel}\nDay P&L: $${state.dayPnL.toFixed(0)}  |  Streak: ${state.consecutiveWins}W\nNext size: ${ct}ct`,
       "default"
     ).catch(()=>{});
   } else {
@@ -971,7 +1154,7 @@ function onTradeEvent(trade) {
     emitBundleEvent('TRADE_CLOSED', { win: false, pnl: +pnl.toFixed(2), signal: resolvedSignal, dir: dirLabel.toLowerCase(), contracts: knownTrade?.contracts ?? trade.contracts ?? 1 });
     notify(
       `❌ Loss -$${Math.abs(pnl).toFixed(0)}${recovTag}`,
-      `Day P&L: $${state.dayPnL.toFixed(0)}  |  Streak: ${state.consecutiveLosses}L\nNext size: ${ct}ct`,
+      `[${(process.env.MARKET ?? "es").toUpperCase()}] ${resolvedSignal} ${dirLabel}\nDay P&L: $${state.dayPnL.toFixed(0)}  |  Streak: ${state.consecutiveLosses}L\nNext size: ${ct}ct`,
       "default"
     ).catch(()=>{});
 
@@ -1179,11 +1362,32 @@ function onAccountEvent(acct) {
   state.balance = bal;
   if (state.peakBalance === null) state.peakBalance = bal;
   if (bal > state.peakBalance) state.peakBalance = bal;
+  // Lazy-fill startOfDayBalance only before the session opens — after 13:30 a mid-day
+  // restart must use reconcileMissedTrades() to infer the true start balance from today's
+  // closed trades, not the current balance (which already includes today's P&L).
+  if (state.startOfDayBalance === null && !state.dayContextRecovered) {
+    const _hm = new Date().getUTCHours() * 100 + new Date().getUTCMinutes();
+    if (_hm >= 1330 && _hm < 1340) {
+      // Right at session open: current balance IS the start balance
+      state.startOfDayBalance = bal;
+      console.log(`[Account] startOfDayBalance set at open: $${bal.toFixed(2)}`);
+    }
+    // After 1340: wait for reconcileMissedTrades to set it correctly from trade history
+  }
+
   // Auto-capture starting balance on first connect so cushion scaling works
   // without requiring the user to enter it manually (FUNDED_START_BALANCE=-1 means auto)
   if (CFG.fundedStartBalance < 0 && state.autoStartBalance == null) {
     state.autoStartBalance = bal;
     console.log(`[Account] Auto-detected starting balance: $${bal.toFixed(2)} — cushion scaling active`);
+  }
+
+  // One-shot combine target notification
+  if (state.simulated && !state.combineTargetNotified && bal >= CFG.accountBase + CFG.combineTarget) {
+    state.combineTargetNotified = true;
+    const profit = (bal - CFG.accountBase).toFixed(0);
+    notify("🎯 Combine Target Hit!", `Balance: $${bal.toFixed(2)}\nProfit: +$${profit} / $${CFG.combineTarget.toFixed(0)} target\nCheck TopstepX dashboard to activate funded account`, "high").catch(() => {});
+    console.log(`[Account] 🎯 COMBINE TARGET HIT — $${bal.toFixed(2)} (+$${profit})`);
   }
 
   const drawdown = state.peakBalance - bal;
@@ -1263,30 +1467,47 @@ function calcContracts() {
   // Activated when FUNDED_START_BALANCE >= 0 (use -1 or omit to disable).
   // TopstepX API returns profit above funded start, not full equity, so
   // state.balance IS the cushion — no subtraction needed.
-  // Ladder: <$2K=1ct | $2K=2ct | $4K=3ct | $6K=4ct | $8K+=5ct
+  // Ladder: $2K cushion per contract step, capped at MAX_CONTRACTS.
+  // 100K Express Funded (10ct max): reaches full size at $18K cushion (~2 weeks at V5 returns).
+  // <$2K=1ct | $2K=2ct | $4K=3ct | $6K=4ct | $8K=5ct | $10K=6ct | $12K=7ct | $14K=8ct | $16K=9ct | $18K+=10ct
   let base = CFG.maxContracts;
   const startBal = CFG.fundedStartBalance >= 0 ? CFG.fundedStartBalance : state.autoStartBalance ?? null;
   if (startBal != null && state.balance != null) {
     const cushion = state.balance - startBal;
     let cushionMax;
-    if      (cushion >= 8000) cushionMax = 5;
-    else if (cushion >= 6000) cushionMax = 4;
-    else if (cushion >= 4000) cushionMax = 3;
-    else if (cushion >= 2000) cushionMax = 2;
-    else                      cushionMax = 1;
+    if      (cushion >= 18000) cushionMax = 10;
+    else if (cushion >= 16000) cushionMax = 9;
+    else if (cushion >= 14000) cushionMax = 8;
+    else if (cushion >= 12000) cushionMax = 7;
+    else if (cushion >= 10000) cushionMax = 6;
+    else if (cushion >= 8000)  cushionMax = 5;
+    else if (cushion >= 6000)  cushionMax = 4;
+    else if (cushion >= 4000)  cushionMax = 3;
+    else if (cushion >= 2000)  cushionMax = 2;
+    else                       cushionMax = 1;
     base = Math.min(CFG.maxContracts, cushionMax);
+  }
+
+  // ── Layer 0a: Combine cushion guard — scale back to 4ct when near the floor ──
+  // Default is 5ct (MAX_CONTRACTS=5). If cushion drops below $2K, drop to 4ct
+  // to protect the trailing DD floor — daily halt at $700 still limits single-day risk.
+  // cushion = balance − (peakBalance − trailDD)
+  if (startBal == null && state.balance != null && state.peakBalance != null) {
+    const floor   = state.peakBalance - CFG.trailDD;
+    const cushion = state.balance - floor;
+    if (cushion < 2000) base = Math.min(base, 4);
   }
 
   // ── Layer 0b: ATR volatility boost ───────────────────────────────────────
   // Backtest 2022-2026: ATR 2.5+ = 25%WR / +$50/tr. ATR 2.0-2.5 = 31%WR / +$106/tr.
   // When market has real range, press size by 1ct — volatility is the edge's fuel.
   const curATR = currentATR();
-  if (curATR !== null && curATR >= 2.5) base = Math.min(CFG.maxContracts, base + 1);
+  if (curATR !== null && curATR >= 2.5) base = Math.min(Math.max(CFG.maxContracts, base), base + 1);
 
   // ── Layer 0c: Thursday edge boost ────────────────────────────────────────
   // Thursday AM shorts: 37.1%WR / +$123/tr — highest-edge session across all days.
   // Overall Thursday: 27.2%WR / +$42/tr / +$2,028/yr. Add 1ct to capitalise.
-  if (new Date().getUTCDay() === 4) base = Math.min(CFG.maxContracts, base + 1);
+  if (new Date().getUTCDay() === 4) base = Math.min(Math.max(CFG.maxContracts, base), base + 1);
 
   // ── Layer 1: Overnight range regime ───────────────────────────────────────
   const range = calcOvernightRange();
@@ -1316,14 +1537,8 @@ function calcContracts() {
   const sessionATR = calcSessionOpenATR();
   const thinMarket = sessionATR !== null && sessionATR < 3.0;
 
-  // ── Layer 4: Prior-day bad-day protection ─────────────────────────────────
-  // If the previous session lost ≥ CFG.badDayThreshold, cap next morning at 1ct.
-  // Prevents compounding a bad day with a full-size run the next morning while
-  // confidence and edge are potentially degraded. Resets after one full session.
-  const badPriorDay = state.prevDayPnL <= -CFG.badDayThreshold;
-
   // ── Combined (all hard caps take priority over streak/regime) ─────────────
-  if (thinMarket || badPriorDay) return 1;
+  if (thinMarket) return 1;
   return Math.max(1, Math.min(base, Math.round(base * regimeMult * streakMult)));
 }
 
@@ -1334,16 +1549,29 @@ function calcContractsVerbose() {
   if (startBal != null && state.balance != null) {
     const cushion = state.balance - startBal;
     let cushionMax;
-    if      (cushion >= 8000) cushionMax = 5;
-    else if (cushion >= 6000) cushionMax = 4;
-    else if (cushion >= 4000) cushionMax = 3;
-    else if (cushion >= 2000) cushionMax = 2;
-    else                      cushionMax = 1;
+    if      (cushion >= 18000) cushionMax = 10;
+    else if (cushion >= 16000) cushionMax = 9;
+    else if (cushion >= 14000) cushionMax = 8;
+    else if (cushion >= 12000) cushionMax = 7;
+    else if (cushion >= 10000) cushionMax = 6;
+    else if (cushion >= 8000)  cushionMax = 5;
+    else if (cushion >= 6000)  cushionMax = 4;
+    else if (cushion >= 4000)  cushionMax = 3;
+    else if (cushion >= 2000)  cushionMax = 2;
+    else                       cushionMax = 1;
     base = Math.min(CFG.maxContracts, cushionMax);
   }
+
+  // Layer 0a: Combine cushion guard (mirrors calcContracts)
+  if (startBal == null && state.balance != null && state.peakBalance != null) {
+    const floor   = state.peakBalance - CFG.trailDD;
+    const cushion = state.balance - floor;
+    if (cushion < 2000) base = Math.min(base, 4);
+  }
+
   const curATRv = currentATR();
-  if (curATRv !== null && curATRv >= 2.5) base = Math.min(CFG.maxContracts, base + 1);
-  if (new Date().getUTCDay() === 4) base = Math.min(CFG.maxContracts, base + 1);
+  if (curATRv !== null && curATRv >= 2.5) base = Math.min(Math.max(CFG.maxContracts, base), base + 1);
+  if (new Date().getUTCDay() === 4) base = Math.min(Math.max(CFG.maxContracts, base), base + 1);
   const range = calcOvernightRange();
   let regimeMult = 1.0, regimeLabel = "🟢 WIDE";
   if (range != null) {
@@ -1357,10 +1585,8 @@ function calcContractsVerbose() {
   else if (state.consecutiveLosses >= 1)                { streakMult = 0.75; streakLabel = `${state.consecutiveLosses}L streak ↓`; }
   const sessionATR = calcSessionOpenATR();
   const thinMarket = sessionATR !== null && sessionATR < 3.0;
-  const badPriorDay = state.prevDayPnL <= -CFG.badDayThreshold;
-  if (thinMarket)  regimeLabel += `  ⚠️ THIN ATR(${sessionATR.toFixed(2)}) — capped 1ct`;
-  if (badPriorDay) regimeLabel += `  ⚠️ BAD PRIOR DAY ($${state.prevDayPnL.toFixed(0)}) — capped 1ct`;
-  const contracts = (thinMarket || badPriorDay)
+  if (thinMarket) regimeLabel += `  ⚠️ THIN ATR(${sessionATR.toFixed(2)}) — capped 1ct`;
+  const contracts = thinMarket
     ? 1
     : Math.max(1, Math.min(base, Math.round(base * regimeMult * streakMult)));
   return { contracts, regimeLabel, streakLabel, regimeMult, streakMult };
@@ -1542,7 +1768,7 @@ async function placeEntry(signalId, isLong, contracts, tradeOpts = {}) {
     }
   }, 3_000);
 
-  const stopDesc   = stopType === "trail" ? `Trail ${stopTicks}t` : `Stop ${stopTicks}t`;
+  const stopDesc   = stopType === "trail" ? `Trail ${stopTicks}t` : `Stop ${Math.abs(slTicks)}t`;
   const bracketTag = " [bracketed ✅]";
   const briefing = `${dir.toUpperCase()} ${contracts}ct  |  ${tfLabel}  |  ${stopDesc}  TP ${tpTicks}t${bracketTag}\nDay P&L so far: $${state.dayPnL.toFixed(0)}`;
   emitBundleEvent('TRADE_ENTERED', { signal: signalId, dir, contracts });
@@ -1557,7 +1783,7 @@ async function placeEntry(signalId, isLong, contracts, tradeOpts = {}) {
 //   stopType "fixed" → Stop at hard price (15m layer, 12t below/above fill)
 async function placeProtectiveOrders(entryOrderId, fillPrice) {
   const trade = state.openTrades.get(entryOrderId);
-  if (!trade || trade.protected) return;
+  if (!trade || trade.protected || trade.isProtective) return;
   trade.protected = true;  // prevent double-placement on duplicate events
 
   const { isLong, contracts, signalId, stopTicks, tpTicks, stopType, barHigh, barLow } = trade;
@@ -1747,25 +1973,54 @@ let _reEvaluateAfterBoot = false;
 
 async function recoverOpenPosition() {
   const persisted = loadPersistedOpenTrade();
-  if (!persisted) return;
 
-  // Check what the API actually has open right now
+  // Always check the REST API for open positions regardless of persisted state.
+  // Root cause: if engine crashed before writing the state file (empty {}), the old
+  // code returned here and left the position completely unprotected.
   const posData = await apiPost("/api/Position/searchOpen", { accountId: state.accountId });
   if (!posData.success) return;
   const openPositions = (posData.positions ?? []).filter(p => (p.size ?? 0) !== 0);
 
   if (openPositions.length === 0) {
-    // Position closed while engine was down — reconcileMissedTrades will log it.
-    // Set flag so tick() runs evaluate immediately after boot rather than waiting
-    // for the next 5-minute boundary, giving the signal a chance to re-enter.
+    if (!persisted) return;
+    // Persisted state exists but position is now flat — reconcileMissedTrades will log it.
     console.log(`[Boot] Persisted trade found but position is flat — will reconcile and re-evaluate immediately`);
     _reEvaluateAfterBoot = true;
     return;
   }
 
   // Position is still live — restore engine state so we keep managing it
-  const openPos  = openPositions[0];
+  const openPos   = openPositions[0];
   const posIsLong = openPos.type === 1;  // PositionType: 1=Long, 2=Short
+
+  // If no persisted state, construct a minimal entry from what the API tells us.
+  // This covers the crash-before-persist case — we still find the position and protect it.
+  const hasPersisted = persisted && Object.keys(persisted).length > 0;
+  if (!hasPersisted) {
+    console.warn(`[Boot] ⚠️  Open ${posIsLong ? "LONG" : "SHORT"} position found but NO persisted state — placing emergency brackets`);
+    notify(`⚠️ Untracked position found`, `Open ${posIsLong ? "LONG" : "SHORT"} ${openPos.size ?? "?"}ct — no persisted context. Placing emergency SL/TP now.`, "urgent").catch(() => {});
+
+    const syntheticId = `orphan-boot-${Date.now()}`;
+    // Use average open price from position API if available, otherwise current price
+    const avgPrice = openPos.avgPrice ?? openPos.averagePrice ?? state.balance;
+    state.activeDirections.add(posIsLong ? "long" : "short");
+    state.openTrades.set(syntheticId, {
+      signalId:     "ORPHAN",
+      isLong:       posIsLong,
+      contracts:    openPos.size ?? 1,
+      isProtective: false,
+      protected:    false,
+      stopTicks:    CFG.stopLossTicks,
+      tpTicks:      CFG.tpTicks,
+      stopType:     "trail",
+    });
+    if (avgPrice) {
+      await placeProtectiveOrders(syntheticId, avgPrice);
+    } else {
+      console.error(`[Boot] Cannot place emergency brackets — no fill price available`);
+    }
+    return;
+  }
 
   console.log(`[Boot] 🔄 Recovering open ${posIsLong ? "LONG" : "SHORT"} position — signal: ${persisted.signalId}`);
   notify(`🔄 Position recovered`, `${persisted.signalId} ${posIsLong ? "LONG" : "SHORT"} ${persisted.contracts ?? "?"}ct @ ${persisted.fillPrice ?? "?"}`, "default").catch(() => {});
@@ -1807,10 +2062,13 @@ async function recoverOpenPosition() {
     if (!savedSlId && !savedTpId) state.openTrades.get(syntheticId).protected = true;
     console.log(`[Boot] ✓ Protective orders confirmed — position is managed`);
   } else {
-    // Brackets were lost — re-place them now
+    // Brackets were lost — re-place them now.
+    // syntheticId must be in openTrades as a non-protective entry so placeProtectiveOrders
+    // can find it — without this, the call returns early when savedSlId/savedTpId are set.
     console.warn(`[Boot] ⚠️  No protective orders found — re-placing SL/TP`);
     notify(`⚠️ Re-placing brackets`, `${persisted.signalId} lost protection on restart — placing now`, "urgent").catch(() => {});
     if (persisted.fillPrice) {
+      state.openTrades.set(syntheticId, { ...tradeEntry, isProtective: false });
       await placeProtectiveOrders(syntheticId, persisted.fillPrice);
     } else {
       console.error(`[Boot] Cannot re-place protection — fill price unknown`);
@@ -1824,6 +2082,8 @@ async function recoverOpenPosition() {
 // that weren't delivered by SignalR (not in seenTradeIds).
 async function reconcileMissedTrades() {
   if (!state.accountId) return;
+  if (state.reconcileInProgress) { console.warn("[Recovery] Already in progress — skipped duplicate call"); return; }
+  state.reconcileInProgress = true;
   try {
     // Always look back to today's session start (13:30 UTC) — never earlier.
     // Before 13:30 UTC there's no AM session yet, so nothing to reconcile.
@@ -1839,6 +2099,23 @@ async function reconcileMissedTrades() {
     });
     if (!data.success) return;
     const trades = data.trades ?? data.items ?? [];
+
+    // ── Mid-day restart: recover dayPnL and startOfDayBalance from trade history ─
+    // The 13:30 UTC day-reset won't fire again after a mid-day restart, so we infer
+    // the true start-of-day balance from the sum of today's closed trades.
+    if (!state.dayContextRecovered && state.balance != null) {
+      let tradedPnL = 0;
+      for (const t of trades) {
+        const p = t.profitAndLoss ?? 0;
+        if (p !== 0 && !t.voided) tradedPnL += p;
+      }
+      const inferredStart = state.balance - tradedPnL;
+      state.startOfDayBalance  = inferredStart;
+      state.dayPnL             = tradedPnL;
+      state.dayContextRecovered = true;
+      writeSharedState(state.dayPnL);
+      console.log(`[Day] ♻️  Mid-day context recovered — day P&L: ${tradedPnL >= 0 ? '+' : ''}$${tradedPnL.toFixed(2)} | inferred start: $${inferredStart.toFixed(2)}`);
+    }
 
     // Restore context from persisted state file if available (written on each entry fill)
     const persisted = loadPersistedOpenTrade();
@@ -1856,31 +2133,53 @@ async function reconcileMissedTrades() {
       const pnl = trade.profitAndLoss ?? 0;
       if (pnl === 0) { state.seenTradeIds.add(tid); saveSeenTradeIds(); continue; } // entry fill — skip
 
-      // Try to recover direction from persisted file or from matching entry fill
-      let signalId   = "RECOVERED";
-      let isLong     = null;
-      let entryPrice = null;
+      // Try to recover direction from persisted file only.
+      // Root cause: entry-fill matching accepts trades from OTHER engine instances during
+      // restart churn, not just this engine's session. Only trust the persisted state file —
+      // that represents the ONE trade this engine knew about from its previous run.
+      let signalId        = "RECOVERED";
+      let isLong          = null;
+      let entryPrice      = null;
+      let persistedMatch  = false;
 
       if (persisted && !persisted._used) {
-        // Persisted state matches this close if it was opened today and not yet consumed
-        signalId   = persisted.signalId;
-        isLong     = persisted.isLong;
-        entryPrice = persisted.fillPrice ?? null;
+        signalId        = persisted.signalId;
+        isLong          = persisted.isLong;
+        entryPrice      = persisted.fillPrice ?? null;
         persisted._used = true;
+        persistedMatch  = true;
         console.warn(`[Recovery] ♻️  Restored context from disk: ${signalId} ${isLong ? "LONG" : "SHORT"} entry@${entryPrice}`);
-      } else {
-        // Fall back: match by opposite-side entry fill with same size within the same 2h window
-        const closeSize = trade.size ?? trade.contracts;
-        const closeSide = trade.side;  // 1=Bid(buy-to-close=SHORT), 2=Ask(sell-to-close=LONG)
-        const matchEntry = entryFills.find(e =>
-          (e.size ?? e.contracts) === closeSize &&
-          e.side !== closeSide
-        );
-        if (matchEntry) {
-          isLong     = (matchEntry.side === 1);  // Bid entry = LONG
-          entryPrice = matchEntry.price ?? null;
-          console.warn(`[Recovery] ♻️  Matched entry fill: ${isLong ? "LONG" : "SHORT"} entry@${entryPrice}`);
-        }
+      }
+
+      // Orphaned trade: already closed on TopstepX, no persisted context.
+      // Day P&L was already recovered above via trade history sum, so no DLL risk.
+      // Log to trades.jsonl so the day is fully auditable.
+      if (!persistedMatch) {
+        console.warn(`[Recovery] ⚠️  Orphaned trade ${tid} (P&L $${pnl.toFixed(2)}) — logging to trades.jsonl (day P&L already recovered)`);
+        state.seenTradeIds.add(tid);
+        saveSeenTradeIds();
+        const now = new Date();
+        logTrade({
+          timestamp:     now.toISOString(),
+          date:          now.toISOString().slice(0, 10),
+          time_mt:       mtTimeStr(now),
+          tax_year:      now.getUTCFullYear(),
+          contract:      (state.contractId ?? "").split(".").slice(-2).join("") || "ES",
+          contract_id:   state.contractId,
+          signal:        "ORPHANED",
+          direction:     trade.side === 0 ? "LONG" : "SHORT",
+          contracts:     trade.size ?? trade.contracts ?? "?",
+          entry_price:   null,
+          exit_price:    trade.price ?? null,
+          gross_pnl:     +pnl.toFixed(2),
+          balance_after: state.balance != null ? +state.balance.toFixed(2) : null,
+          peak_balance:  state.peakBalance != null ? +state.peakBalance.toFixed(2) : null,
+          day_pnl_after: +state.dayPnL.toFixed(2),
+          voided:        trade.voided ?? false,
+          section_1256:  true,
+          note:          "recovered after restart — context unavailable",
+        });
+        continue;
       }
 
       const dirLabel = isLong === true ? "LONG" : isLong === false ? "SHORT" : "?";
@@ -1903,6 +2202,8 @@ async function reconcileMissedTrades() {
     saveSeenTradeIds();
   } catch (e) {
     console.warn("[Recovery] Could not fetch missed trades:", e.message);
+  } finally {
+    state.reconcileInProgress = false;
   }
 }
 
@@ -2225,17 +2526,20 @@ function runEvaluate() {
   }
 
   // Session gate — signal evaluation only runs during active trading windows.
-  // AM session: 13:45–15:00 UTC (skip first 15 min of RTH — opening range chaos)
-  // PM session: 18:30–19:00 UTC (strategies.js PM_END=1900; 18:00–18:30 is lunch lull)
-  // FOMC days: block AM too — pre-announcement market is directionless/whipsaw
-  const inAM = hm >= 1345 && hm < 1500 && !state.isFOMCDay;
-  const inPM = hm >= 1830 && hm < 1900 && !state.isFOMCDay && !isTodayEarlyClose();
+  // AM session: 13:45–15:00 UTC (skip first 15 min of RTH — OB_FADE handles 13:30 retroactively)
+  // PM session: 18:00–20:00 UTC (V5 PM_VWAP_FADE covers full 2-hour window)
+  // FOMC days: block non-NQ (directionless/whipsaw); NQ V5 fade signals are exempt —
+  //   large FOMC moves are ideal fade setups and 8t stops bound the risk.
+  const isNQ = CFG.contractSearch === "NQ";
+  const inAM = hm >= 1345 && hm < 1500 && (!state.isFOMCDay || isNQ);
+  const inPM = hm >= 1800 && hm < 2000 && (!state.isFOMCDay || isNQ) && !isTodayEarlyClose();
   if (!inAM && !inPM) return;
 
-  // Monday PM filter: Mon PM has 0%WR longs / 5.3%WR shorts (-$6,175 net, 4.5yr) — skip PM entirely
-  if (inPM && now.getUTCDay() === 1) return;
-  // Gap-up PM filter: gap-up days (AM open >1pt above prior close) have 9.9%WR in PM (-$82/tr, 4.5yr)
-  if (inPM && state.gapUpDay) return;
+  // Monday PM filter: skip for NQ V5 (backtest included Monday PM sessions; fade edge is session-agnostic)
+  if (inPM && !isNQ && now.getUTCDay() === 1) return;
+  // Gap-up PM filter: gap-up days have 9.9%WR in PM (-$82/tr, 4.5yr) for ES.
+  // NQ exempt: backtest shows same 32% WR on gap-up vs normal PM days (-$4,566/yr drag if applied).
+  if (inPM && state.gapUpDay && !isNQ) return;
 
   const contracts = calcContracts();
 
@@ -2277,8 +2581,7 @@ function runEvaluate() {
 
   let signals;
   try {
-    const isNQ = CFG.contractSearch === "NQ";
-    const mainSigs = isNQ ? evaluateNQ(state.bars) : evaluate(state.bars);
+    const mainSigs = isNQ ? evaluateNQ(state.bars, state.esBars) : evaluate(state.bars);
     const extSigs  = isNQ ? [] : evaluateExtended(state.bars);  // MARKET_STRUCT_S + DAY_BREAK_FAIL_S (ES only)
     signals = [...mainSigs, ...extSigs];
     if (CFG.regimeFilter === "bull") signals = signals.filter(s => s.side === "long");
@@ -2288,9 +2591,20 @@ function runEvaluate() {
     return;
   }
 
-  if (signals.length === 0) {
+  {
     const hm2 = new Date().getUTCHours() * 100 + new Date().getUTCMinutes();
-    console.log(`[Strategy] ${hm2} UTC — evaluated ${state.bars.length} bars, 0 signals`);
+    if (signals.length === 0) {
+      console.log(`[Strategy] ${hm2} UTC — evaluated ${state.bars.length} bars, 0 signals`);
+    } else {
+      // Log every evaluated signal before any filter — lets us compare against backtest
+      for (const s of signals) {
+        const _slBase = s.side === 'long'
+          ? (s.barLow  != null ? s.barLow  - (s.stopTicks ?? CFG.stopTicks) * 0.25 : s.price - (s.stopTicks ?? CFG.stopTicks) * 0.25)
+          : (s.barHigh != null ? s.barHigh + (s.stopTicks ?? CFG.stopTicks) * 0.25 : s.price + (s.stopTicks ?? CFG.stopTicks) * 0.25);
+        const _slT = Math.round(Math.abs(s.price - _slBase) / 0.25);
+        console.log(`[Sig] ${hm2} UTC  ${s.id.padEnd(26)} ${s.side.toUpperCase().padEnd(5)}  px:${s.price.toFixed(2)}  SL:${_slT}t  barLow:${s.barLow?.toFixed(2) ?? '?'}`);
+      }
+    }
   }
 
   const _stopCooldownMs = 15 * 60 * 1000;
@@ -2325,9 +2639,9 @@ function runEvaluate() {
     const dir = sig.side === "long" ? "long" : "short";  // strategies.js always uses sig.side
     // Trend-day direction filter — AM only. PM accuracy tested at 46-51% (coin flip),
     // so suppression is disabled in PM to avoid blocking profitable counter-trend signals.
-    if (inAM && state.noShortsToday && dir === "short") continue;
+    if (inAM && state.noShortsToday && dir === "short" && !sig.ignoreTrendFilter) continue;
     // noLongsToday gate: bypass once if the first long already won (momentum confirmation)
-    if (inAM && state.noLongsToday && dir === "long") {
+    if (inAM && state.noLongsToday && dir === "long" && !sig.ignoreTrendFilter) {
       if (state.sessionLongWon && state.sessionLongCount < 2) {
         console.log(`[Gate] 🟢 noLongsToday bypassed — first long won, allowing 2nd (${sig.id})`);
       } else {
@@ -2368,6 +2682,9 @@ function runEvaluate() {
       barHigh:   sig.barHigh,
       barLow:    sig.barLow,
       sigPrice:  sig.price,
+    }).then(result => {
+      // placeEntry returns null when skipped (e.g. stop too wide) — release gate immediately
+      if (result === null) state.activeDirections.delete(dir);
     }).catch(err => {
       console.error("[Order] Error:", err.message);
       state.activeDirections.delete(dir);  // release on failure
@@ -2422,8 +2739,8 @@ function runEvaluate15() {
     if (!CFG15m.allowedStrategies.has(root)) return false;
     if (CFG.pausedStrategies.some(p => sig.id.startsWith(p))) return false;
     const dir = sig.side === "long" ? "long" : "short";
-    if (state.noShortsToday && dir === "short") return false;
-    if (state.noLongsToday && dir === "long") {
+    if (state.noShortsToday && dir === "short" && !sig.ignoreTrendFilter) return false;
+    if (state.noLongsToday && dir === "long" && !sig.ignoreTrendFilter) {
       if (state.sessionLongWon && state.sessionLongCount < 2) return true;  // bypass: first long won
       return false;
     }
@@ -2464,6 +2781,30 @@ function runEvaluate15() {
 
 // ─── Pre-session brief ────────────────────────────────────────────────────────
 async function preSessionBrief() {
+  // ── Engine health check — fire URGENT alert if anything looks wrong ──────
+  try {
+    const engineCount = parseInt(
+      execSync('pgrep -f "topstepx-engine.js" 2>/dev/null | wc -l').toString().trim(), 10
+    );
+    const svCount = parseInt(
+      execSync('pgrep -f "multi-account.mjs" 2>/dev/null | wc -l').toString().trim(), 10
+    );
+    const healthy = engineCount === 1 && svCount === 1;
+    if (!healthy) {
+      const msg = [
+        `🚨 ${engineCount} engine(s), ${svCount} supervisor(s) — expected 1 each`,
+        `Session opens in ~5 min — act NOW`,
+        `Fix: pm2 restart topstepx-all`,
+      ].join("\n");
+      await notify("🚨 ENGINE HEALTH ALERT", msg, "urgent");
+      console.error(`[Health] ❌ ALERT SENT — ${engineCount} engine(s), ${svCount} supervisor(s)`);
+    } else {
+      console.log(`[Health] ✅ 1 supervisor, 1 engine — clean`);
+    }
+  } catch (e) {
+    console.error("[Health] check failed:", e.message);
+  }
+
   const range  = calcOvernightRange();
   const { contracts, regimeLabel, streakLabel, regimeMult, streakMult } = calcContractsVerbose();
   const dayPnL = state.dayPnL;
@@ -2511,7 +2852,7 @@ async function preSessionBrief() {
         ? `Paused strategies   : none (all 7 V3 signals active)`
         : `Paused strategies   : ⚠️  ${userDisabled.join(", ")} (disabled by user config)`;
     })(),
-    `AM session          : ${state.isFOMCDay ? "⛔ DISABLED (FOMC day)" : `${isDST() ? "7:45–9:00 MDT" : "6:45–8:00 MST"} (13:45-15:00 UTC)`}`,
+    `AM session          : ${state.isFOMCDay ? (CFG.contractSearch === "NQ" ? "⚠️  FOMC day — NQ fade signals ACTIVE (others blocked)" : "⛔ DISABLED (FOMC day)") : `${isDST() ? "7:45–9:00 MDT" : "6:45–8:00 MST"} (13:45-15:00 UTC)`}`,
     `PM session          : ${state.isFOMCDay ? "⛔ DISABLED (FOMC day)" : isTodayEarlyClose() ? "⛔ DISABLED (early close)" : `${isDST() ? "12:30–1:00 PM MDT" : "11:30 AM–12:00 PM MST"} (18:30-19:00 UTC)`}`,
     `Trend filter        : ${state.noShortsToday ? "📈 UPTREND — shorts suppressed" : state.noLongsToday ? "📉 DOWNTREND — longs suppressed" : state.amTrendChecked ? "→ Neutral — all signals active" : "⏳ Pending (fires at 14:15 UTC)"}`,
     `Overbought gate     : ${state.upPctOverbought ? "🔴 ACTIVE — trending strats suppressed (8+/10 days up)" : "✅ Off"}`,
@@ -2525,7 +2866,7 @@ async function preSessionBrief() {
   const balance    = state.balance     ?? state.peakBalance ?? null;
   const peak       = state.peakBalance ?? balance;
   const ddUsed     = peak != null && balance != null ? Math.max(0, peak - balance) : null;
-  const ddBuffer   = ddUsed != null ? Math.max(0, 2000 - ddUsed) : null;
+  const ddBuffer   = ddUsed != null ? Math.max(0, CFG.trailDD - ddUsed) : null;
   const profitSoFar = balance != null ? Math.max(0, balance - CFG.accountBase) : null;
 
   const bundlePayload = {
@@ -2560,7 +2901,7 @@ async function preSessionBrief() {
     state.simulated && profitSoFar != null
       ? `Combine: $${profitSoFar.toFixed(0)} / $${CFG.combineTarget.toFixed(0)}  ($${Math.max(0, CFG.combineTarget - profitSoFar).toFixed(0)} to go)`
       : null,
-    `News: ${state._newsBlocks?.length || 0}  |  FOMC: ${state.isFOMCDay ? "YES ⚠️" : "No"}`,
+    `Engine: ✅ 1 running  |  News: ${state._newsBlocks?.length || 0}  |  FOMC: ${state.isFOMCDay ? "YES ⚠️" : "No"}`,
     `Trend: ${bundlePayload.trendStatus}`,
     volPct != null ? `Vol: ${volPct}% of avg ${volPct >= 120 ? "✅" : volPct >= 80 ? "⚠️" : "🔇"}` : null,
     `AM 7:45 ${bundlePayload.tz}  |  PM 12:30–2:00`,
@@ -2582,15 +2923,15 @@ async function endOfDaySummary() {
   const balStr      = bal  != null ? `$${bal.toFixed(0)}`  : "—";
   const peakStr     = peak != null ? `$${peak.toFixed(0)}` : "—";
 
-  // Trailing DD: Topstep rule — balance must stay above (peak − $2,000)
+  // Trailing DD: Topstep rule — balance must stay above (peak − trailDD)
   const ddUsed      = peak != null && bal != null ? peak - bal : null;
-  const ddBuffer    = ddUsed != null ? Math.max(0, 2000 - ddUsed) : null;
+  const ddBuffer    = ddUsed != null ? Math.max(0, CFG.trailDD - ddUsed) : null;
   const ddLine      = ddBuffer != null
-    ? `DD used: $${ddUsed.toFixed(0)} / $2,000  (${ddBuffer.toFixed(0)} remaining)`
+    ? `DD used: $${ddUsed.toFixed(0)} / $${CFG.trailDD.toFixed(0)}  (${ddBuffer.toFixed(0)} remaining)`
     : "";
 
   // Progress line — combine shows target; funded shows total earned on funded account
-  const profitSoFar  = bal != null ? Math.max(0, bal - 50000) : null;
+  const profitSoFar  = bal != null ? Math.max(0, bal - CFG.accountBase) : null;
   const progressLine = profitSoFar != null
     ? (state.simulated
         ? (() => {
@@ -2709,28 +3050,17 @@ async function tick() {
   const min = now.getUTCMinutes();
   const sec = now.getUTCSeconds();
 
-  // ── 5m evaluation — pre-close (primary) + post-close (fallback) ───────────
-  // Bucket maps both the 4th-minute pre-close AND the 0th-minute post-close of
-  // the same 5-min bar to one key — preventing double-evaluation of the same bar.
-  // Formula: Math.floor((min+1)/5)*5 % 60 → e.g. min=49→50, min=50→50, min=59→0, min=0→0
-  const bar5Bucket = (Math.floor((min + 1) / 5) * 5) % 60;
+  // ── 5m evaluation — confirmed closed bar only ────────────────────────────
+  // Evaluates on the final settled bar (includePartialBar=false) so signal
+  // conditions match the backtest exactly. Pre-close partial evaluation removed
+  // 2026-09-18 — it caused 2-4 tick close differences vs settled bars, making
+  // live signals diverge from backtest predictions.
+  const bar5Bucket = min - (min % 5); // 0,5,10,...55
 
-  // Pre-close: last 10 seconds of the 4th minute (e.g. 13:49:50–13:49:59).
-  // includePartialBar=true returns the nearly-complete bar so signals fire ~10s
-  // before the bar officially closes — entries land at a tighter price.
-  if (min % 5 === 4 && sec >= 50 && bar5Bucket !== lastBar5Min) {
-    lastBar5Min = bar5Bucket;
-    await fetchBars(300, true).catch(console.error);   // near-final bar
-    await reconcilePositions().catch(console.error);
-    runEvaluate();
-  }
-
-  // Post-close fallback: first 10 seconds after bar close (e.g. 13:50:00–13:50:09).
-  // includePartialBar=false — only fires if the pre-close tick was missed or the
-  // API hadn't published the bar yet. Direction gate prevents any double-trade.
+  // Fire in first 10 seconds after each 5m boundary (e.g. 13:50:00–13:50:09).
   if (min % 5 === 0 && sec <= 10 && bar5Bucket !== lastBar5Min) {
     lastBar5Min = bar5Bucket;
-    await fetchBars(300, false).catch(console.error);  // confirmed closed bar
+    await Promise.all([fetchBars(300, false), fetchESBars()]).catch(console.error);  // confirmed closed bar
     await reconcilePositions().catch(console.error);
     runEvaluate();
   }
@@ -2740,7 +3070,7 @@ async function tick() {
   if (_reEvaluateAfterBoot) {
     _reEvaluateAfterBoot = false;
     console.log("[Boot] 🔁 Post-recovery re-evaluate — checking if signal still valid");
-    await fetchBars(300, false).catch(console.error);
+    await Promise.all([fetchBars(300, false), fetchESBars()]).catch(console.error);
     runEvaluate();
     runEvaluate15();
   }
@@ -2755,7 +3085,8 @@ async function tick() {
 
   // Pre-session brief: 13:25 UTC (5 min before AM open)
   // getUTCSeconds() < 10 prevents double-fire — tick runs every 10s
-  if (hm === 1325 && sec < 10) {
+  if (hm === 1325 && sec < 10 && !state.briefSentToday) {
+    state.briefSentToday = true;
     if (isTodayWeekend()) {
       console.log("⛔ WEEKEND — no session today");
     } else if (isTodayHoliday()) {
@@ -2793,17 +3124,19 @@ async function tick() {
     state.dayLosses         = 0;
     state.haltedToday       = false;
     state.profitCappedToday  = false;
+    state.briefSentToday    = false;
     state.runnerClosePending = false;
     state.consecutiveLosses  = 0;
     state.consecutiveWins   = 0;
     state.cooldownUntil     = 0;
     state.pendingRetry      = null;
     state.mismatchRetryDone = false;
-    state.amSessionOpenPrice = null;
-    state.amTrendChecked     = false;
-    state.noShortsToday      = false;
-    state.noLongsToday       = false;
-    state.sessionLongWon     = false;
+    state.amSessionOpenPrice  = null;
+    state.amTrendChecked      = false;
+    state.noShortsToday       = false;
+    state.noLongsToday        = false;
+    state.sessionLongWon      = false;
+    state.dayContextRecovered = false; // allow reconcileMissedTrades to re-recover tomorrow
     state.sessionLongCount   = 0;
     state.gapUpDay           = false;
 
@@ -2856,7 +3189,10 @@ async function main() {
   await login();
   await resolveAccount();
   await resolveContract();
-  await Promise.all([fetchBars(300), fetchBars15(300)]);  // load both timeframes in parallel
+  await resolveESContract();
+  // Boot: fetch 30 days of 5m bars (3000 bars, 720h) to seed the ADR20 cache in nq-strategies.js.
+  // Periodic 5m bar refreshes use the default 300-bar/48h window — ADR cache persists in module memory.
+  await Promise.all([fetchBars(3000, false, 720), fetchBars15(300), fetchESBars()]);  // load all bar feeds in parallel
   await refreshNewsFilter();
   await connectHub();
   await recoverOpenPosition().catch(e => console.warn("[Boot] Recovery check failed:", e.message));
@@ -2878,7 +3214,20 @@ async function main() {
   await notify("🟢 Engine online", `TopstepX engine started\nAccount: $${state.peakBalance?.toFixed(0)}\nContract: ${contractShort}  |  Max: ${CFG.maxContracts}ct\nAM session opens 7:45 ${isDST() ? "MDT" : "MST"}`, "low");
 }
 
-main().catch(err => {
-  console.error("[FATAL]", err.message);
-  process.exit(1);
-});
+// Retry startup on transient failure — mirrors how the old v9 IB engine handled
+// disconnects internally. Exit only on SIGTERM (handled above) or a permanent error.
+let _startupAttempt = 0;
+(async function startWithRetry() {
+  while (true) {
+    try {
+      await main();
+      return; // main() resolved cleanly (shouldn't happen normally)
+    } catch (err) {
+      _startupAttempt++;
+      const delay = Math.min(10_000 * _startupAttempt, 60_000); // 10s, 20s … 60s cap
+      console.error(`[FATAL] Startup failed (attempt ${_startupAttempt}): ${err.message}`);
+      console.error(`[FATAL] Retrying in ${delay / 1000}s — engine stays alive, no restart needed`);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+})();
