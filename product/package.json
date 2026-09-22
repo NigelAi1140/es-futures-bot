@@ -1,6 +1,6 @@
 {
   "name": "oracle-trading-system",
-  "version": "1.2.6",
+  "version": "1.2.7",
   "description": "Oracle Trading System — NQ/ES algorithmic trading engine for TopstepX",
   "type": "module",
   "main": "electron/main.js",

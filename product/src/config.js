@@ -81,12 +81,36 @@ const DEFAULT_ON_STRATEGIES = {
   KELT_L:       true,
 };
 
+// NQ V5.3 strategies — default on when NQ market is active.
+const NQ_DEFAULT_ON_STRATEGIES = {
+  NQ_OB_FADE_S:      true,
+  NQ_AM_VWAP_FADE_S: true,
+  NQ_ADR_FADE_S:     true,
+  NQ_14H_REV:        true,
+  NQ_FIRST30_FADE_S: true,
+  NQ_PM_VWAP_FADE_S: true,
+  NQ_ADR_EXHAUST_S:  true,
+};
+
 /**
  * Apply forward-migrations to a merged config object in place.
  * Returns true if anything changed (so the caller can persist the fix).
  */
 function migrateConfig(cfg) {
   let changed = false;
+
+  // v1.1.55: market field — default to "es" if not present.
+  if (!cfg.market) {
+    cfg.market = "es";
+    changed = true;
+  }
+
+  // v1.1.55: NQ strategies — add defaults if not present when market is nq.
+  if (cfg.market === "nq" && cfg.strategies && typeof cfg.strategies === "object") {
+    for (const [id, val] of Object.entries(NQ_DEFAULT_ON_STRATEGIES)) {
+      if (!(id in cfg.strategies)) { cfg.strategies[id] = val; changed = true; }
+    }
+  }
 
   // v1.1.19: stopMode "trail" was overriding all strategy-level fixed stops.
   // Correct value is null (let each strategy decide).
@@ -139,7 +163,7 @@ function validateConfig(cfg) {
   const t       = cfg.trading;
   const isAlpaca = cfg.broker?.type === "alpaca";
 
-  check(t.contracts,        1, 10,    "trading.contracts");
+  check(t.contracts,        1, 15,    "trading.contracts");
   check(t.stopLossTicks,    5, 20,    "trading.stopLossTicks");
   check(t.maxStopTicks,    10, 60,    "trading.maxStopTicks");
   check(t.takeProfitTicks, 20, 100,   "trading.takeProfitTicks");

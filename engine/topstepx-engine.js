@@ -93,6 +93,53 @@ function writeSharedState(dayPnL) {
   } catch { /* non-fatal — CL bot falls back to ungated if file missing */ }
 }
 
+// Session gate persistence — survives engine restarts during outages.
+// Saves all intra-day filters so a reconnect during the AM session restores
+// the exact gate state rather than re-firing signals with a clean slate.
+const SESSION_GATE_PATH = join(__dir, "..", "logs", "session-gates.json");
+
+function saveSessionGates(state) {
+  try {
+    const logsDir = join(__dir, "..", "logs");
+    if (!existsSync(logsDir)) mkdirSync(logsDir, { recursive: true });
+    writeFileSync(SESSION_GATE_PATH, JSON.stringify({
+      date:               new Date().toISOString().slice(0, 10),
+      dayPnL:             +state.dayPnL.toFixed(2),
+      haltedToday:        state.haltedToday,
+      profitCappedToday:  state.profitCappedToday,
+      amTrendChecked:     state.amTrendChecked,
+      noShortsToday:      state.noShortsToday,
+      noLongsToday:       state.noLongsToday,
+      sessionLongWon:     state.sessionLongWon,
+      consecutiveWins:    state.consecutiveWins,
+      consecutiveLosses:  state.consecutiveLosses,
+      cooldownUntil:      state.cooldownUntil,
+      updatedAt:          new Date().toISOString(),
+    }));
+  } catch { /* non-fatal */ }
+}
+
+function restoreSessionGates(state) {
+  try {
+    if (!existsSync(SESSION_GATE_PATH)) return false;
+    const saved = JSON.parse(readFileSync(SESSION_GATE_PATH, "utf8"));
+    const today = new Date().toISOString().slice(0, 10);
+    if (saved.date !== today) return false;  // stale — different day
+
+    state.dayPnL            = saved.dayPnL            ?? 0;
+    state.haltedToday       = saved.haltedToday       ?? false;
+    state.profitCappedToday = saved.profitCappedToday ?? false;
+    state.amTrendChecked    = saved.amTrendChecked     ?? false;
+    state.noShortsToday     = saved.noShortsToday      ?? false;
+    state.noLongsToday      = saved.noLongsToday       ?? false;
+    state.sessionLongWon    = saved.sessionLongWon     ?? false;
+    state.consecutiveWins   = saved.consecutiveWins    ?? 0;
+    state.consecutiveLosses = saved.consecutiveLosses  ?? 0;
+    state.cooldownUntil     = saved.cooldownUntil      ?? 0;
+    return true;
+  } catch { return false; }
+}
+
 // Read last N lines of ES.txt (efficient tail — avoids loading the whole 100MB file)
 function esTextTailLines(n = 3000) {
   const filePath = resolve(__dir, "../ES.txt");
@@ -1191,6 +1238,8 @@ function onTradeEvent(trade) {
     console.log(`[Risk] 🏆 Day P&L $${state.dayPnL.toFixed(2)} — profit cap $${CFG.dailyProfitCap} reached. Stopping for the day`);
     notify("🏆 Great day — locked in", `Up $${state.dayPnL.toFixed(0)}\n${capReason}`, "high").catch(()=>{});
   }
+
+  saveSessionGates(state);
 }
 
 // ─── Event: Position ──────────────────────────────────────────────────────────
@@ -1756,6 +1805,18 @@ async function placeEntry(signalId, isLong, contracts, tradeOpts = {}) {
           return;  // brackets are live — nothing to do
         }
 
+        // No protective orders on the book — check if position is already flat
+        // (stop may have filled and closed us before this 3s watchdog ran)
+        const posData2 = await apiPost("/api/Position/searchOpen", { accountId: state.accountId }).catch(() => ({ positions: [] }));
+        const positions2 = posData2.positions ?? posData2.items ?? [];
+        const stillOpen  = positions2.some(p => p.contractId === state.contractId && Math.abs(+(p.size ?? p.qty ?? 0)) > 0);
+        if (!stillOpen) {
+          console.log(`[Watchdog] ℹ️  ${signalId}: no open position found — stop already filled, cleaning up`);
+          state.openTrades.delete(entryOrderId);
+          state.activeDirections.delete(dir);
+          return;
+        }
+
         // No protective orders on the book → bracket wasn't placed
         if (t.emergencyClose) {
           console.log(`[Watchdog] ℹ️  ${signalId}: emergency close already in flight — skipping bracket retry`);
@@ -2154,6 +2215,17 @@ async function reconcileMissedTrades() {
       state.dayContextRecovered = true;
       writeSharedState(state.dayPnL);
       console.log(`[Day] ♻️  Mid-day context recovered — day P&L: ${tradedPnL >= 0 ? '+' : ''}$${tradedPnL.toFixed(2)} | wins: ${dayWins} | losses: ${dayLosses} | inferred start: $${inferredStart.toFixed(2)}`);
+
+      // Restore gate flags from disk (trend filter, halted, cooldown, etc.)
+      // dayPnL above comes from trade history (authoritative); gates file fills in
+      // everything else (noShortsToday, haltedToday, consecutiveLosses, etc.)
+      const gatesRestored = restoreSessionGates(state);
+      // Re-apply dayPnL from trade history — it's more accurate than the file value
+      state.dayPnL = tradedPnL;
+      writeSharedState(state.dayPnL);
+      if (gatesRestored) {
+        console.log(`[Gates] ♻️  Session gates restored — noShorts=${state.noShortsToday} noLongs=${state.noLongsToday} halted=${state.haltedToday} cooldownUntil=${state.cooldownUntil > Date.now() ? new Date(state.cooldownUntil).toISOString() : "none"}`);
+      }
     }
 
     // Restore context from persisted state file if available (written on each entry fill)
@@ -2632,6 +2704,7 @@ function runEvaluate() {
         notify("→ Neutral Day", msg, "default").catch(console.error);
       }
     }
+    saveSessionGates(state);
   }
 
   let signals;
@@ -3178,6 +3251,7 @@ async function tick() {
     }
     state.dayPnL            = 0;
     writeSharedState(0);
+    saveSessionGates(state);  // write zeroed gates so restore sees today's clean slate
     state.dayWins           = 0;
     state.dayLosses         = 0;
     state.haltedToday       = false;

@@ -6,7 +6,7 @@
  * Rule     : never animate danger signals — warn/fail print immediately
  */
 
-export const VERSION      = "1.1.39";
+export const VERSION      = "1.1.54";
 export const PRODUCT_NAME = "ES FUTURES BOT";
 
 // ── Color tokens ──────────────────────────────────────────────────────────────
