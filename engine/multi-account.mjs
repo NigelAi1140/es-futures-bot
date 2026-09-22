@@ -8,7 +8,7 @@
 // engine_type: "topstepx" (default) | "alpaca"
 
 import { spawn }          from 'child_process';
-import { readFileSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, openSync, closeSync, unlinkSync, existsSync, createWriteStream, mkdirSync, renameSync, statSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath }  from 'url';
 import dotenv             from 'dotenv';
@@ -19,10 +19,72 @@ const ROOT          = resolve(__dir, '..');
 const ENGINE_TSX    = resolve(__dir, 'topstepx-engine.js');
 const ENGINE_ALPACA = resolve(__dir, 'alpaca-engine.js');
 const CONFIG        = resolve(ROOT, 'accounts.json');
-const BASE_ENV   = resolve(ROOT, '.env');
+const BASE_ENV      = resolve(ROOT, '.env');
+const LOCK_FILE     = resolve(ROOT, 'logs', 'multi-account.lock');
+
+// ── Singleton lockfile guard (atomic) ─────────────────────────────────────────
+// Uses O_CREAT|O_EXCL (wx flag) — atomic on all POSIX filesystems.
+// No TOCTOU race: if two instances start simultaneously, exactly one wins the
+// exclusive create; the other gets EEXIST and checks whether the winner is alive.
+mkdirSync(resolve(ROOT, 'logs'), { recursive: true });
+const acquireLock = () => {
+  try {
+    // Atomic exclusive create — fails immediately if file already exists
+    const fd = openSync(LOCK_FILE, 'wx');
+    writeFileSync(fd, String(process.pid));
+    closeSync(fd);
+  } catch (e) {
+    if (e.code !== 'EEXIST') throw e;
+    // Lockfile exists — check if the owning PID is still alive
+    const existingPid = parseInt(readFileSync(LOCK_FILE, 'utf8').trim(), 10);
+    let alive = true;
+    try { process.kill(existingPid, 0); } catch { alive = false; }
+    if (alive) {
+      console.error(`\n❌  multi-account.mjs is already running (PID ${existingPid}). Exiting to prevent duplicate engines.\n   Delete ${LOCK_FILE} manually if the process is gone.\n`);
+      process.exit(1);
+    }
+    // Stale lockfile — remove and retry the atomic create once
+    console.warn(`⚠️  Stale lockfile (PID ${existingPid} is gone) — removing and continuing.`);
+    unlinkSync(LOCK_FILE);
+    try {
+      const fd = openSync(LOCK_FILE, 'wx');
+      writeFileSync(fd, String(process.pid));
+      closeSync(fd);
+    } catch {
+      console.error(`\n❌  Concurrent startup race — another instance acquired the lock first. Exiting.\n`);
+      process.exit(1);
+    }
+  }
+};
+acquireLock();
+const removeLock = () => { try { unlinkSync(LOCK_FILE); } catch {} };
+process.on('exit', removeLock);
 
 // ── Load base .env (shared settings) ──────────────────────────────────────────
 dotenv.config({ path: BASE_ENV });
+
+// ── File logging ───────────────────────────────────────────────────────────────
+const LOGS_DIR = resolve(ROOT, 'logs');
+mkdirSync(LOGS_DIR, { recursive: true });
+const LOG_FILE = resolve(LOGS_DIR, 'multi-account.log');
+
+// Rotate if log exceeds 50 MB
+try {
+  if (statSync(LOG_FILE).size > 50 * 1024 * 1024) {
+    renameSync(LOG_FILE, LOG_FILE.replace('.log', `-${new Date().toISOString().slice(0, 10)}.log`));
+  }
+} catch { /* file doesn't exist yet */ }
+
+const logStream = createWriteStream(LOG_FILE, { flags: 'a' });
+
+function logLine(text, isError = false) {
+  const ts   = new Date().toISOString().replace('T', ' ').slice(0, 23);
+  const line = `[${ts}] ${text}\n`;
+  logStream.write(line);
+  (isError ? process.stderr : process.stdout).write(text + '\n');
+}
+
+logLine(`\n🚀  Multi-account orchestrator starting — log: ${LOG_FILE}`);
 
 // ── Load accounts config ───────────────────────────────────────────────────────
 if (!existsSync(CONFIG)) {
@@ -69,7 +131,7 @@ if (accounts.length > 5) {
   accounts = accounts.slice(0, 5);
 }
 
-console.log(`\n🚀  Multi-account orchestrator starting — ${accounts.length} account(s)\n`);
+logLine(`🚀  ${accounts.length} account(s) configured\n`);
 
 // ── Bundled push notifications ─────────────────────────────────────────────────
 const NTFY_CHANNEL = (process.env.NTFY_CHANNEL || accounts[0]?.NTFY_CHANNEL || "").trim();
@@ -329,19 +391,19 @@ function startAccount(account) {
 
   if (isAlpaca) {
     if (!ALPACA_KEY || !ALPACA_SECRET) {
-      console.error(`${pad(name)} ❌  Missing ALPACA_KEY or ALPACA_SECRET — skipping`);
+      logLine(`${pad(name)} ❌  Missing ALPACA_KEY or ALPACA_SECRET — skipping`, true);
       return;
     }
   } else {
     if (!TV_USER || !TV_API_KEY) {
-      console.error(`${pad(name)} ❌  Missing TV_USER or TV_API_KEY — skipping`);
+      logLine(`${pad(name)} ❌  Missing TV_USER or TV_API_KEY — skipping`, true);
       return;
     }
   }
 
   const entry = procs.get(name) || { restarts: 0, lastStart: 0 };
   if (entry.restarts >= MAX_RESTARTS) {
-    console.error(`${pad(name)} ❌  Exceeded ${MAX_RESTARTS} restarts — giving up`);
+    logLine(`${pad(name)} ❌  Exceeded ${MAX_RESTARTS} restarts — giving up`, true);
     return;
   }
 
@@ -367,7 +429,25 @@ function startAccount(account) {
       };
 
   const engineScript = isAlpaca ? ENGINE_ALPACA : ENGINE_TSX;
-  console.log(`${pad(name)} ▶  Starting ${isAlpaca ? "Alpaca" : "TopstepX"} engine (restart #${entry.restarts})`);
+
+  // Pre-spawn safety check: verify no live engine lockfile exists for this account.
+  // Catches the case where a prior supervisor crashed and left an orphaned engine running.
+  const accountId  = account.ACCOUNT_ID || account.TV_USER || name;
+  const safeId     = String(accountId).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40);
+  const engineLock = resolve(LOGS_DIR, `engine-${safeId}.lock`);
+  if (existsSync(engineLock)) {
+    const existingPid = parseInt(readFileSync(engineLock, 'utf8').trim(), 10);
+    let alive = true;
+    try { process.kill(existingPid, 0); } catch { alive = false; }
+    if (alive) {
+      logLine(`${pad(name)} ❌  Engine already running (PID ${existingPid} per lockfile) — skipping spawn to prevent duplicate`, true);
+      return;
+    }
+    logLine(`${pad(name)} ⚠️  Stale engine lockfile (PID ${existingPid} gone) — removing before spawn`);
+    try { unlinkSync(engineLock); } catch {}
+  }
+
+  logLine(`${pad(name)} ▶  Starting ${isAlpaca ? "Alpaca" : "TopstepX"} engine (restart #${entry.restarts})`);
 
   const proc = spawn('node', [engineScript], {
     env,
@@ -385,33 +465,33 @@ function startAccount(account) {
   proc.stdout.on('data', (buf) => {
     buf.toString().split('\n').filter(Boolean).forEach(l => {
       if (l.startsWith('[BUNDLE] ')) {
-        try { addEvent(name, JSON.parse(l.slice(9))); } catch { console.log(prefix(l)); }
+        try { addEvent(name, JSON.parse(l.slice(9))); } catch { logLine(prefix(l)); }
       } else {
-        console.log(prefix(l));
+        logLine(prefix(l));
       }
     });
   });
   proc.stderr.on('data', (buf) => {
-    buf.toString().split('\n').filter(Boolean).forEach(l => console.error(prefix(l)));
+    buf.toString().split('\n').filter(Boolean).forEach(l => logLine(prefix(l), true));
   });
 
   proc.on('exit', (code, signal) => {
     const reason = signal ? `signal ${signal}` : `code ${code}`;
-    console.warn(`${pad(name)} ⚠️  Engine exited (${reason})`);
+    logLine(`${pad(name)} ⚠️  Engine exited (${reason})`, true);
 
-    if (code === 0) {
-      console.log(`${pad(name)} ✅  Clean exit — not restarting`);
+    if (shutdownInProgress) {
+      logLine(`${pad(name)} ✅  Supervisor shutting down — not restarting`);
       return;
     }
 
     entry.restarts++;
     const delay = RESTART_DELAY_MS * Math.min(entry.restarts, 6); // exponential backoff up to ~60s
-    console.log(`${pad(name)} 🔄  Restarting in ${delay/1000}s (attempt ${entry.restarts}/${MAX_RESTARTS})`);
+    logLine(`${pad(name)} 🔄  Restarting in ${delay/1000}s (attempt ${entry.restarts}/${MAX_RESTARTS})`);
     setTimeout(() => startAccount(account), delay);
   });
 
   proc.on('error', (err) => {
-    console.error(`${pad(name)} ❌  Process error: ${err.message}`);
+    logLine(`${pad(name)} ❌  Process error: ${err.message}`, true);
   });
 }
 
@@ -422,27 +502,46 @@ accounts.forEach((account, idx) => {
 });
 
 // ── Graceful shutdown ──────────────────────────────────────────────────────────
+let shutdownInProgress = false;
 const shutdown = (sig) => {
-  console.log(`\n📴  ${sig} received — shutting down all engines...\n`);
+  shutdownInProgress = true;
+  logLine(`\n📴  ${sig} received — shutting down all engines...\n`);
+  removeLock();
   for (const [name, entry] of procs) {
     if (entry.proc && !entry.proc.killed) {
-      console.log(`${pad(name)} 🛑  Stopping`);
+      logLine(`${pad(name)} 🛑  Stopping`);
       entry.proc.kill('SIGTERM');
     }
   }
-  setTimeout(() => process.exit(0), 3000);
+  setTimeout(() => process.exit(0), 1200); // under PM2's 1600ms kill_timeout — prevents SIGKILL mid-shutdown
 };
 
 process.on('SIGINT',  () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 
+// Kill all children on unexpected crash — prevents orphaned engines
+process.on('uncaughtException', (err) => {
+  logLine(`\n💥  Uncaught exception — killing all engines before exit: ${err.message}`, true);
+  for (const [, entry] of procs) {
+    try { if (entry.proc && !entry.proc.killed) entry.proc.kill('SIGTERM'); } catch {}
+  }
+  setTimeout(() => process.exit(1), 2000);
+});
+process.on('unhandledRejection', (reason) => {
+  logLine(`\n💥  Unhandled rejection — killing all engines before exit: ${reason}`, true);
+  for (const [, entry] of procs) {
+    try { if (entry.proc && !entry.proc.killed) entry.proc.kill('SIGTERM'); } catch {}
+  }
+  setTimeout(() => process.exit(1), 2000);
+});
+
 // ── Status heartbeat every 30 min ─────────────────────────────────────────────
 setInterval(() => {
   const running = [...procs.entries()].filter(([,e]) => e.proc && !e.proc.killed);
-  console.log(`\n📊  Heartbeat — ${running.length}/${accounts.length} engines running`);
+  logLine(`\n📊  Heartbeat — ${running.length}/${accounts.length} engines running`);
   for (const [name, entry] of procs) {
     const alive = entry.proc && !entry.proc.killed;
-    console.log(`  ${alive ? '🟢' : '🔴'} ${name.padEnd(maxLen)}  restarts: ${entry.restarts}`);
+    logLine(`  ${alive ? '🟢' : '🔴'} ${name.padEnd(maxLen)}  restarts: ${entry.restarts}`);
   }
-  console.log('');
+  logLine('');
 }, 30 * 60 * 1000);

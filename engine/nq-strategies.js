@@ -1,25 +1,29 @@
-// NQ Strategy Signal Evaluator — Portfolio V5.5 (regime overfit 2026-09-20)
-// Optimized on Jun–Sep 2026 (last 3 months) for Oct–Dec 2026 deployment.
-// Optimizer: greedy per-signal sweep, thresholds × {6,8,10,12}t SL × {16..80}t TP.
-// Next re-opt: end of December 2026 (re-run on Sep–Dec window).
-//   - OB_FADE_S: surge ≥10t (was 15t), SL 12t (was 8t), TP 80t (was 64t)
-//   - AM_VWAP_FADE_S: dev ≥15t (was 25t), SL 6t, TP 72t (was 64t)
-//   - ADR_FADE_S: move ≥35% ADR (was 60%), SL 6t, TP 80t (was 40t)
-//   - 14H_REV_S: ≥25t above AM open (was 40t), SL 6t, TP 80t (was 64t)
-//   - FIRST30_FADE_S: SL 6t (was 8t), TP 40t unchanged
-//   - PM_VWAP_FADE_S: dev ≥15t (was 25t), SL 6t, TP 48t (was 64t)
-//   - OVERNIGHT_TRAP_S: gap ≥20t (was 50t), SL 6t, TP 80t (was 64t)
-//   - SESSION_HIGH_FAIL_S: DISABLED (negative in Jun–Sep 2026)
-// Long fades (OB/VWAP/ADR/FIRST30/PM_L) tombstoned in topstepx-engine.js 2026-09-14.
+// NQ Strategy Signal Evaluator — Portfolio V5.7 (combined WF2 — 2026-09-21)
+// Combined walk-forward (10 signals, Jan–Sep 2026, 37 weeks) — $115,012 vs $65,406 baseline (+76%).
+// Changes from V5.6:
+//   4. TIGHT_VWAP_AM added  — AM/PM VWAP fade at 12–24t deviation band, TP 56t
+//   5. HILOW_REJ_AM added   — session H/L rejection (new extreme + close back inside), TP 84t
+//   6. MOM_EXHAUST_AM added — 4-bar consecutive momentum fade, TP 76t
+//   7. PULLBACK_AM added    — 15t initial move + 8-16t pullback re-entry, TP 20t
+// Prior changes (V5.6):
+//   1. OB_FADE DISABLED — 9% WR after 22 live-forward trades
+//   2. AM_VWAP_FADE_L threshold ≤-40t → ≤-25t
+//   3. FIRST30_FADE TP 40t → 76t
+// Next re-opt: end of December 2026.
 //
-// Signal ID                Gate     Stop  TP   Session
-// NQ_OB_FADE_S             S       12t   80t  AM 13:30 bar        opening bar surge ≥10t
-// NQ_AM_VWAP_FADE_S        S        6t   72t  AM 13:30–15:00 UTC  VWAP dev ≥15t
-// NQ_ADR_FADE_S            S        6t   80t  AM                  move ≥35% ADR from open
-// NQ_14H_REV_S             SINGLE   6t   80t  AM 14:00+ UTC       move ≥25t above AM open
-// NQ_FIRST30_FADE_S        S        6t   40t  AM 14:00+           close breaks prior AM high
-// NQ_PM_VWAP_FADE_S        S        6t   48t  PM 18:00–20:00 UTC  VWAP dev ≥15t
-// NQ_OVERNIGHT_TRAP_S      S        6t   80t  AM 13:30–14:00 UTC  gap up ≥20t, fade < open
+// Signal ID                Gate     Stop  TP    Session
+// NQ_OB_FADE_S/L           DISABLED (WF2: 9% WR, killed at week 7)
+// NQ_AM_VWAP_FADE_L        S        6t   72t   AM 13:30–15:00 UTC  VWAP dev ≤-25t
+// NQ_AM_VWAP_FADE_S        S        6t   72t   AM 13:30–15:00 UTC  VWAP dev ≥15t
+// NQ_ADR_FADE_S            S        6t   80t   AM                  move ≥35% ADR from open
+// NQ_14H_REV_S             SINGLE   6t   80t   AM 14:00+ UTC       move ≥25t above AM open
+// NQ_FIRST30_FADE_L/S      S        6t   76t   AM 14:00+           close breaks prior AM range
+// NQ_PM_VWAP_FADE_S        S        6t   48t   PM 18:00–20:00 UTC  VWAP dev ≥15t
+// NQ_OVERNIGHT_TRAP_S      S        6t   80t   AM 13:30–14:00 UTC  gap up ≥20t, fade < open
+// NQ_TIGHT_VWAP_AM_L/S     S        6t   56t   AM+PM              VWAP dev 12–24t band
+// NQ_HILOW_REJ_AM_L/S      S        6t   84t   AM                 new session H/L rejected (close back inside)
+// NQ_MOM_EXHAUST_AM_L/S    S        6t   76t   AM                 4 consecutive bars same direction → fade
+// NQ_PULLBACK_AM_L/S       S        6t   20t   AM                 15t move + 8–16t pullback re-entry
 // NQ_SESSION_HIGH_FAIL_S   DISABLED (negative Jun–Sep 2026)
 
 const TICK        = 0.25;
@@ -42,11 +46,22 @@ const _obFiredL        = new Set();
 const _obFiredS        = new Set();
 const _onTrapFiredS    = new Set();
 const _sesHFFailFiredS = new Set();
+const _tightVwapFiredL = new Set();
+const _tightVwapFiredS = new Set();
+const _hilowRejFiredL  = new Set();
+const _hilowRejFiredS  = new Set();
+const _momExhFiredL    = new Set();
+const _momExhFiredS    = new Set();
+const _pullbackFiredL  = new Set();
+const _pullbackFiredS  = new Set();
 
 // ── Persistent cross-session state ────────────────────────────────────────────
 // Survives bar-window resets; cleared only on process restart.
-const _adrDayCache  = new Map(); // date → { hi, lo } of that day's AM session
-const _amHighPerDay = new Map(); // date → max bar-high seen in AM session (for SESSION_HIGH_FAIL_S)
+const _adrDayCache    = new Map(); // date → { hi, lo } of that day's AM session
+const _amHighPerDay   = new Map(); // date → max bar-high seen in AM session (for SESSION_HIGH_FAIL_S)
+const _amSessionHi    = new Map(); // date → running session high (for HILOW_REJ_AM)
+const _amSessionLo    = new Map(); // date → running session low  (for HILOW_REJ_AM)
+const _pbStage        = new Map(); // date → { stage:'wait'|'up'|'dn', peak, prevClose } (PULLBACK_AM)
 
 export function resetConfRevState() {
   _amVwapFiredL.clear();
@@ -62,6 +77,14 @@ export function resetConfRevState() {
   _obFiredS.clear();
   _onTrapFiredS.clear();
   _sesHFFailFiredS.clear();
+  _tightVwapFiredL.clear();
+  _tightVwapFiredS.clear();
+  _hilowRejFiredL.clear();
+  _hilowRejFiredS.clear();
+  _momExhFiredL.clear();
+  _momExhFiredS.clear();
+  _pullbackFiredL.clear();
+  _pullbackFiredS.clear();
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -151,27 +174,9 @@ export const evaluateNQ = (bars, _esBars = []) => {
 
   const signals = [];
 
-  // ─── NQ_OB_FADE_L / NQ_OB_FADE_S — Opening Bar Fade ─────────────────────────
-  // The 13:30 opening 5m bar sometimes makes an extreme move. Fade it.
-  // v52-full: short surge ≥15t, TP 48t. Engine starts at 13:45 so check retroactively.
-  if (inAM) {
-    const needL = !_obFiredL.has(today);
-    const needS = !_obFiredS.has(today);
-    if (needL || needS) {
-      const ob = bars.find(b => barDate(b.time) === today && barHM(b.time) === AM_OPEN_HM);
-      if (ob) {
-        const move = ob.close - ob.open;
-        if (needL && move <= -(20 * TICK)) {
-          _obFiredL.add(today);
-          signals.push({ id: 'NQ_OB_FADE_L', side: 'long',  price: c, stopTicks: 12, tpTicks: 80, stopType: 'fixed', ignoreTrendFilter: true });
-        }
-        if (needS && move >= (10 * TICK)) {
-          _obFiredS.add(today);
-          signals.push({ id: 'NQ_OB_FADE_S', side: 'short', price: c, stopTicks: 12, tpTicks: 80, stopType: 'fixed', ignoreTrendFilter: true });
-        }
-      }
-    }
-  }
+  // ─── NQ_OB_FADE_L / NQ_OB_FADE_S — DISABLED V5.6 ────────────────────────────
+  // WF2 walk-forward (Jan–Sep 2026): 9% WR after 22 trades, disabled at week 7.
+  // Re-evaluate after 3 months of live data with new params.
 
   // ─── NQ_AM_VWAP_FADE_L / NQ_AM_VWAP_FADE_S — AM Session VWAP Fade ───────────
   // v52-full: short dev ≥25t, TP 48t. 1L+1S per day.
@@ -179,7 +184,7 @@ export const evaluateNQ = (bars, _esBars = []) => {
     const vwap = sessionVWAP(bars, today, AM_OPEN_HM, AM_CLOSE_HM);
     if (vwap !== null) {
       const devT = (c - vwap) / TICK;
-      if (!_amVwapFiredL.has(today) && devT <= -40) {
+      if (!_amVwapFiredL.has(today) && devT <= -25) {
         _amVwapFiredL.add(today);
         signals.push({ id: 'NQ_AM_VWAP_FADE_L', side: 'long',  price: c, stopTicks: 6, tpTicks: 72, stopType: 'fixed', ignoreTrendFilter: true });
       }
@@ -236,11 +241,11 @@ export const evaluateNQ = (bars, _esBars = []) => {
       const amHigh = Math.max(...priorAM.map(b => b.high));
       if (!_first30FiredL.has(today) && c < amLow) {
         _first30FiredL.add(today);
-        signals.push({ id: 'NQ_FIRST30_FADE_L', side: 'long',  price: c, stopTicks: 6, tpTicks: 40, stopType: 'fixed', ignoreTrendFilter: true });
+        signals.push({ id: 'NQ_FIRST30_FADE_L', side: 'long',  price: c, stopTicks: 6, tpTicks: 76, stopType: 'fixed', ignoreTrendFilter: true });
       }
       if (!_first30FiredS.has(today) && c > amHigh) {
         _first30FiredS.add(today);
-        signals.push({ id: 'NQ_FIRST30_FADE_S', side: 'short', price: c, stopTicks: 6, tpTicks: 40, stopType: 'fixed', ignoreTrendFilter: true });
+        signals.push({ id: 'NQ_FIRST30_FADE_S', side: 'short', price: c, stopTicks: 6, tpTicks: 76, stopType: 'fixed', ignoreTrendFilter: true });
       }
     }
   }
@@ -281,6 +286,102 @@ export const evaluateNQ = (bars, _esBars = []) => {
   // NQ_SESSION_HIGH_FAIL_S — DISABLED V5.5 (negative Jun–Sep 2026, re-evaluate Dec 2026)
 
   // NQ_BEAR_MOMENTUM_S — disabled 2026-09-18 (SL structurally too wide, r=0.175)
+
+  // ─── NQ_TIGHT_VWAP_AM_L / NQ_TIGHT_VWAP_AM_S — Tight VWAP Band Fade ─────────
+  // Fires at 12–24t VWAP deviation (below the existing AM_VWAP threshold of 25t).
+  // AM and PM sessions. 1L + 1S per session. TP 56t, stop 6t.
+  if (inAM || inPM) {
+    const tvOpenHM  = inAM ? AM_OPEN_HM : PM_OPEN_HM;
+    const tvCloseHM = inAM ? AM_CLOSE_HM : PM_CLOSE_HM;
+    const tvVwap = sessionVWAP(bars, today, tvOpenHM, tvCloseHM);
+    if (tvVwap !== null) {
+      const devT = (c - tvVwap) / TICK;
+      // Band: 12–24t (at 25t+ the existing AM/PM_VWAP_FADE takes over)
+      if (!_tightVwapFiredS.has(today) && devT >= 12 && devT < 24) {
+        _tightVwapFiredS.add(today);
+        signals.push({ id: 'NQ_TIGHT_VWAP_AM_S', side: 'short', price: c, stopTicks: 6, tpTicks: 56, stopType: 'fixed', ignoreTrendFilter: true });
+      }
+      if (!_tightVwapFiredL.has(today) && devT <= -12 && devT > -24) {
+        _tightVwapFiredL.add(today);
+        signals.push({ id: 'NQ_TIGHT_VWAP_AM_L', side: 'long',  price: c, stopTicks: 6, tpTicks: 56, stopType: 'fixed', ignoreTrendFilter: true });
+      }
+    }
+  }
+
+  // ─── NQ_HILOW_REJ_AM_L / NQ_HILOW_REJ_AM_S — Session H/L Rejection ──────────
+  // New session high/low but close prints back inside prior bar's range → rejection.
+  // 1L + 1S per day. TP 84t, stop 6t.
+  if (inAM) {
+    const prevHi = (!isNaN(prev.high))  ? prev.high : c;
+    const prevLo = (!isNaN(prev.low))   ? prev.low  : c;
+    // Snapshot PREVIOUS session extreme before updating with this bar
+    const prevSessionHi = _amSessionHi.get(today);
+    const prevSessionLo = _amSessionLo.get(today);
+    // Update running session hi/lo with current bar
+    if (prevSessionHi === undefined || last.high >= prevSessionHi) _amSessionHi.set(today, last.high);
+    if (prevSessionLo === undefined || last.low  <= prevSessionLo) _amSessionLo.set(today, last.low);
+    // New session high = this bar's high exceeds previous session high, AND close rejected back below prior bar's high
+    if (!_hilowRejFiredS.has(today) && prevSessionHi !== undefined && last.high > prevSessionHi && c < prevHi) {
+      _hilowRejFiredS.add(today);
+      signals.push({ id: 'NQ_HILOW_REJ_AM_S', side: 'short', price: c, stopTicks: 6, tpTicks: 84, stopType: 'fixed', ignoreTrendFilter: true });
+    }
+    // New session low = this bar's low exceeds previous session low, AND close rejected back above prior bar's low
+    if (!_hilowRejFiredL.has(today) && prevSessionLo !== undefined && last.low < prevSessionLo && c > prevLo) {
+      _hilowRejFiredL.add(today);
+      signals.push({ id: 'NQ_HILOW_REJ_AM_L', side: 'long',  price: c, stopTicks: 6, tpTicks: 84, stopType: 'fixed', ignoreTrendFilter: true });
+    }
+  }
+
+  // ─── NQ_MOM_EXHAUST_AM_L / NQ_MOM_EXHAUST_AM_S — 4-Bar Momentum Exhaustion ───
+  // 4 consecutive bars in same direction → fade next bar. 1L + 1S per day. TP 76t, stop 6t.
+  if (inAM && bars.length >= 5) {
+    const b1 = bars[bars.length - 5];
+    const b2 = bars[bars.length - 4];
+    const b3 = bars[bars.length - 3];
+    const b4 = bars[bars.length - 2]; // prev bar (confirmed close)
+    if (barDate(b1.time) === today && barDate(b2.time) === today &&
+        barDate(b3.time) === today && barDate(b4.time) === today) {
+      const up4 = b2.close > b1.close && b3.close > b2.close && b4.close > b3.close;
+      const dn4 = b2.close < b1.close && b3.close < b2.close && b4.close < b3.close;
+      if (up4 && !_momExhFiredS.has(today)) {
+        _momExhFiredS.add(today);
+        signals.push({ id: 'NQ_MOM_EXHAUST_AM_S', side: 'short', price: c, stopTicks: 6, tpTicks: 76, stopType: 'fixed', ignoreTrendFilter: true });
+      }
+      if (dn4 && !_momExhFiredL.has(today)) {
+        _momExhFiredL.add(today);
+        signals.push({ id: 'NQ_MOM_EXHAUST_AM_L', side: 'long',  price: c, stopTicks: 6, tpTicks: 76, stopType: 'fixed', ignoreTrendFilter: true });
+      }
+    }
+  }
+
+  // ─── NQ_PULLBACK_AM_L / NQ_PULLBACK_AM_S — Initial Move + Pullback Re-entry ───
+  // 15t+ initial move from AM open, then 8–16t pullback, re-enter in trend direction.
+  // 1L + 1S per day. TP 20t, stop 6t.
+  if (inAM) {
+    const amOpen = amSessionOpen(bars, today);
+    if (amOpen !== null) {
+      const st = _pbStage.get(today) ?? { stage: 'wait' };
+      const moveT = (c - amOpen) / TICK;
+      if (st.stage === 'wait') {
+        if (moveT >= 15)       { st.stage = 'up'; st.peak = c; _pbStage.set(today, st); }
+        else if (moveT <= -15) { st.stage = 'dn'; st.peak = c; _pbStage.set(today, st); }
+      } else if (st.stage === 'up') {
+        if (c > st.peak) { st.peak = c; _pbStage.set(today, st); }
+        const pullT = (st.peak - c) / TICK;
+        if (pullT >= 8 && pullT <= 16 && !_pullbackFiredL.has(today)) {
+          _pullbackFiredL.add(today);
+          signals.push({ id: 'NQ_PULLBACK_AM_L', side: 'long',  price: c, stopTicks: 6, tpTicks: 20, stopType: 'fixed', ignoreTrendFilter: true });
+        }
+      } else if (st.stage === 'dn') {
+        if (c < st.peak) { st.peak = c; _pbStage.set(today, st); }
+        const pullT = (c - st.peak) / TICK;
+        if (pullT >= 8 && pullT <= 16 && !_pullbackFiredS.has(today)) {
+          _pullbackFiredS.add(today);
+          signals.push({ id: 'NQ_PULLBACK_AM_S', side: 'short', price: c, stopTicks: 6, tpTicks: 20, stopType: 'fixed', ignoreTrendFilter: true });
+        }
+      }
+    }
+  }
 
   return signals;
 };

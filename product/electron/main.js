@@ -11,7 +11,7 @@
 
 import { app, BrowserWindow, ipcMain, shell } from "electron";
 import { spawn }            from "child_process";
-import { existsSync }       from "fs";
+import { existsSync, readFileSync } from "fs";
 import { resolve, dirname, join } from "path";
 import { fileURLToPath }    from "url";
 
@@ -60,6 +60,8 @@ const MAX_RESTARTS   = 20;
 let activeConfig     = null;
 
 // ── Create main dashboard window ──────────────────────────────────────────────
+let _bootScheduled = false; // guard against duplicate regime/update intervals
+
 function createMainWindow() {
   const isMac = process.platform === "darwin";
   mainWin = new BrowserWindow({
@@ -86,6 +88,56 @@ function createMainWindow() {
   mainWin.on("closed", () => {
     shutdownEngines();
     mainWin = null;
+  });
+
+  mainWin.webContents.once("did-finish-load", async () => {
+    let config;
+    try {
+      ({ config } = loadConfig(CONFIG_PATH));
+    } catch (err) {
+      mainWin?.webContents.send("license-invalid", "Config load failed — please reinstall.");
+      return;
+    }
+
+    const license = await verifyLicense(config, CONFIG_PATH);
+
+    if (!license.valid) {
+      mainWin?.webContents.send("license-invalid", license.reason);
+      return;
+    }
+
+    mainWin?.webContents.send("license-ok", license.email, {
+      daysLeft:     license.daysLeft    ?? null,
+      isTrial:      license.isTrial     ?? false,
+      isFreeLoader: license.isFreeLoader ?? false,
+    });
+    mainWin?.webContents.send("config-loaded", {
+      accounts:    config.broker.type === "alpaca"
+        ? ["Alpaca-Paper"]
+        : (config.broker.accounts ?? []).filter(a => a.id).map(a => a.name),
+      broker:      { type: config.broker.type ?? "topstepx",
+                     alpacaKey: config.broker.alpacaKey ?? "",
+                     alpacaSecret: config.broker.alpacaSecret ?? "" },
+      trading:     config.trading,
+      strategies:  config.strategies,
+      trendFilter: config.trendFilter,
+      market:      config.market ?? "es",
+    });
+
+    startLicenseWatchdog(config, CONFIG_PATH, (reason) => {
+      mainWin?.webContents.send("license-invalid", reason);
+    });
+
+    if (!_bootScheduled) {
+      _bootScheduled = true;
+      if (IS_PKG) {
+        setTimeout(() => autoUpdater.checkForUpdates().catch(() => {}), 15_000);
+        setInterval(() => autoUpdater.checkForUpdates().catch(() => {}), 60 * 60 * 1000);
+      }
+      scheduleRegimeChecks();
+    }
+
+    launchEngines(config);
   });
 }
 
@@ -125,55 +177,15 @@ app.whenReady().then(async () => {
     return;
   }
 
-  let config;
+  // Verify config is parseable; fall back to setup wizard if not
   try {
-    ({ config } = loadConfig(CONFIG_PATH));
+    loadConfig(CONFIG_PATH);
   } catch (err) {
     createSetupWindow();
     return;
   }
 
-  // License check before showing the window
-  const license = await verifyLicense(config, CONFIG_PATH);
-
   createMainWindow();
-
-  mainWin.webContents.once("did-finish-load", async () => {
-    if (!license.valid) {
-      mainWin.webContents.send("license-invalid", license.reason);
-      return;
-    }
-
-    mainWin.webContents.send("license-ok", license.email, {
-      daysLeft:     license.daysLeft    ?? null,
-      isTrial:      license.isTrial     ?? false,
-      isFreeLoader: license.isFreeLoader ?? false,
-    });
-    mainWin.webContents.send("config-loaded", {
-      accounts:    config.broker.type === "alpaca"
-        ? ["Alpaca-Paper"]
-        : (config.broker.accounts ?? []).map(a => a.name),
-      broker:      { type: config.broker.type ?? "topstepx",
-                     alpacaKey: config.broker.alpacaKey ?? "",
-                     alpacaSecret: config.broker.alpacaSecret ?? "" },
-      trading:     config.trading,
-      strategies:  config.strategies,
-      trendFilter: config.trendFilter,
-    });
-
-    startLicenseWatchdog(config, CONFIG_PATH, (reason) => {
-      mainWin?.webContents.send("license-invalid", reason);
-    });
-
-    // Check for updates on launch, then every hour
-    if (IS_PKG) {
-      setTimeout(() => autoUpdater.checkForUpdates().catch(() => {}), 15_000);
-      setInterval(() => autoUpdater.checkForUpdates().catch(() => {}), 60 * 60 * 1000);
-    }
-
-    launchEngines(config);
-    scheduleRegimeChecks();
-  });
 });
 
 app.on("window-all-closed", () => {
@@ -203,7 +215,7 @@ function launchEngines(config) {
   if (config.broker.type === "alpaca") {
     startAlpacaEngine(config);
   } else {
-    config.broker.accounts.forEach((acc, i) => {
+    config.broker.accounts.filter(a => a.id).forEach((acc, i) => {
       setTimeout(() => startAccount(acc, config), i * 2000);
     });
   }
@@ -246,7 +258,7 @@ function startAlpacaEngine(config) {
 
   const emit = (line) => {
     mainWin?.webContents.send("engine-log", { account: name, line });
-    const pnlMatch = line.match(/P&L.*?(\$[\d,.+-]+)/);
+    const pnlMatch = line.match(/P&L.*?(-?\$[\d,.]+)/);
     const balMatch = line.match(/balance=\$([0-9,.]+)/);
     if (pnlMatch) mainWin?.webContents.send("pnl-update",     { account: name, pnl:     pnlMatch[1] });
     if (balMatch) mainWin?.webContents.send("balance-update",  { account: name, balance: balMatch[1] });
@@ -280,7 +292,8 @@ function startAccount(account, config) {
     TV_USER:            config.broker.username,
     TV_API_KEY:         config.broker.apiKey,
     ACCOUNT_ID:         account.id ?? "",
-    SYMBOL:             config.broker.symbol ?? "ES",
+    SYMBOL:             config.market === "nq" ? "NQ" : (config.broker.symbol ?? "ES"),
+    MARKET:             config.market ?? "es",
     MAX_CONTRACTS:      String(t.contracts),
     STOP_MODE:          t.stopMode ?? "trail",
     STOP_LOSS_TICKS:    String(t.stopLossTicks),
@@ -314,9 +327,9 @@ function startAccount(account, config) {
 
       // Parse structured events for the dashboard
       const tradeMatch  = line.match(/\[(?:Order|Trade)\].*?(LONG|SHORT).*?(\d+)ct/);
-      const pnlMatch    = line.match(/P&L.*?(\$[\d,.+-]+)/);
+      const pnlMatch    = line.match(/P&L.*?(-?\$[\d,.]+)/);
       const balMatch    = line.match(/balance=\$([0-9,.]+)/);
-      const haltMatch   = line.match(/Daily loss limit|profit cap.*reached/);
+      const haltMatch   = line.match(/Daily loss limit.*hit|profit cap.*reached/);
       const trendMatch  = line.match(/\[Trend\].*(UPTREND|DOWNTREND|NEUTRAL)/);
 
       if (tradeMatch)  mainWin?.webContents.send("trade-event",   { account: account.name, dir: tradeMatch[1], size: tradeMatch[2] });
@@ -464,6 +477,30 @@ ipcMain.handle("search-accounts", async (_, { username, apiKey }) => {
 ipcMain.handle("get-version", () => app.getVersion());
 ipcMain.handle("get-config",  () => activeConfig);
 
+ipcMain.handle("export-trades", async () => {
+  try {
+    const logsDir  = IS_PKG ? join(process.resourcesPath, "logs") : resolve(ROOT, "../logs");
+    const jsonlPath = join(logsDir, "trades.jsonl");
+    if (!existsSync(jsonlPath)) return { ok: false, error: "No trade history found yet." };
+
+    const lines = readFileSync(jsonlPath, "utf8").trim().split("\n").filter(Boolean);
+    if (!lines.length) return { ok: false, error: "Trade log is empty." };
+
+    const records = lines.map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+
+    const headers = ["date","time_mt","contract","signal","direction","contracts","entry_price","exit_price","gross_pnl","day_pnl_after","balance_after"];
+    const rows = records.map(r => headers.map(h => {
+      const v = r[h] ?? "";
+      return typeof v === "string" && v.includes(",") ? `"${v}"` : v;
+    }).join(","));
+
+    const csv = [headers.join(","), ...rows].join("\n");
+    return { ok: true, csv, count: records.length };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
 // ── Regime detection ──────────────────────────────────────────────────────────
 async function runRegimeCheck({ manual = false } = {}) {
   try {
@@ -571,13 +608,14 @@ ipcMain.handle("resume-all", () => {
     mainWin?.webContents.send("config-loaded", {
       accounts:    activeConfig.broker.type === "alpaca"
         ? ["Alpaca-Paper"]
-        : (activeConfig.broker.accounts ?? []).map(a => a.name),
+        : (activeConfig.broker.accounts ?? []).filter(a => a.id).map(a => a.name),
       broker:      { type: activeConfig.broker.type ?? "topstepx",
                      alpacaKey: activeConfig.broker.alpacaKey ?? "",
                      alpacaSecret: activeConfig.broker.alpacaSecret ?? "" },
       trading:     activeConfig.trading,
       strategies:  activeConfig.strategies,
       trendFilter: activeConfig.trendFilter,
+      market:      activeConfig.market ?? "es",
     });
     return { ok: true };
   } catch(e) {

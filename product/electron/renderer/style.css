@@ -872,3 +872,244 @@ body.is-mac #btn-minimize         { display: none; }
   color: var(--text-dim);
   letter-spacing: 0.06em;
 }
+
+/* ── Market toggle (ES / NQ) ───────────────────────────────────────────────── */
+.market-toggle-wrap {
+  padding: 6px 20px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.market-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.market-pill {
+  display: flex;
+  background: rgba(0,0,0,0.35);
+  border: 1px solid var(--green-lo);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.mkt-btn {
+  background: none;
+  border: none;
+  color: var(--green-lo);
+  font-family: var(--font);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  padding: 3px 14px;
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+
+.mkt-btn.active {
+  background: var(--green-lo);
+  color: #000;
+  font-weight: 600;
+}
+
+.mkt-btn:hover:not(.active) {
+  background: rgba(0,200,50,0.08);
+  color: var(--green-med);
+}
+
+/* ── NQ strategy panel ─────────────────────────────────────────────────────── */
+.strat-row-nq {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  padding: 2px 0;
+}
+
+.strat-row-nq .strat-label {
+  flex: 1;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  color: var(--green-hi);
+}
+
+.strat-session {
+  font-size: 9px;
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.strat-wr-badge {
+  font-size: 9px;
+  font-weight: 700;
+  color: #000;
+  background: var(--green-hi);
+  padding: 1px 5px;
+  border-radius: 2px;
+  letter-spacing: 0.04em;
+}
+
+.strat-nq-note {
+  font-size: 9px;
+  color: var(--text-dim);
+  margin-top: 4px;
+  letter-spacing: 0.04em;
+  opacity: 0.7;
+}
+
+/* ── Account row with combine size ─────────────────────────────────────────── */
+.acct-settings-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 4px;
+}
+
+.acct-row-name {
+  flex: 1;
+  font-size: 11px;
+  color: var(--green-hi);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.combine-size-sel {
+  background: rgba(0,0,0,0.5);
+  border: 1px solid var(--green-lo);
+  color: var(--green-med);
+  font-family: var(--font);
+  font-size: 10px;
+  padding: 1px 3px;
+  cursor: pointer;
+  letter-spacing: 0.06em;
+  width: 56px;
+}
+
+.acct-auto-label {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 9px;
+  color: var(--text-dim);
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.acct-row-type {
+  font-size: 10px;
+  color: var(--green-lo);
+}
+
+.acct-row-remove {
+  background: none;
+  border: 1px solid var(--green-lo);
+  color: var(--green-lo);
+  padding: 1px 6px;
+  cursor: pointer;
+  font-size: 11px;
+  font-family: var(--font);
+}
+
+/* ── Settings v2 (redesigned) ────────────────────────────────────────────── */
+.settings-box:has(.settings-body-v2) {
+  max-width: 420px;
+  width: 420px;
+}
+
+.settings-body-v2 {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 18px 22px;
+  max-height: 440px;
+  overflow-y: auto;
+}
+
+.settings-body-v2::-webkit-scrollbar       { width: 3px; }
+.settings-body-v2::-webkit-scrollbar-thumb { background: var(--panel-bdr); }
+
+/* Market checkboxes */
+.mkt-checks-row {
+  display: flex;
+  gap: 18px;
+  margin-bottom: 4px;
+}
+
+.mkt-check-label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  color: var(--green-med);
+  -webkit-app-region: no-drag;
+}
+
+.mkt-check-label input[type="checkbox"] {
+  accent-color: var(--green-med);
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+}
+
+.mkt-check-label span {
+  font-weight: 600;
+}
+
+/* Read-only strategy display */
+.strats-display-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 4px;
+  padding: 6px 0 2px;
+}
+
+.strat-display-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  padding: 2px 0;
+  color: var(--green-med);
+}
+
+.strat-disp-label {
+  flex: 1;
+  letter-spacing: 0.05em;
+}
+
+.strat-disp-sess {
+  font-size: 9px;
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.strat-disp-tp {
+  font-size: 9px;
+  color: var(--green-lo);
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  width: 28px;
+  text-align: right;
+}
+
+/* Account size banner */
+.acct-size-banner {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--green-hi);
+  padding: 4px 0 6px;
+}
+
+/* Manual account size row */
+.acct-size-manual-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}

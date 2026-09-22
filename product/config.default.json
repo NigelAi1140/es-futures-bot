@@ -3,26 +3,14 @@
     "email": ""
   },
 
+  "market": "es",
+
   "broker": {
     "type": "topstepx",
     "username": "",
     "symbol": "ES",
     "apiKey": "",
-    "accounts": [
-      {
-        "name": "Account 1",
-        "type": "Funded",
-        "strategies": {
-          "DONCH15_L":    true,
-          "VOLBO_L":      true,
-          "VOLBO_S":      true,
-          "EMA21_PULL_L": true,
-          "BO10_S":       true,
-          "3BAR_BEAR_S":  true,
-          "KELT_L":       true
-        }
-      }
-    ]
+    "accounts": []
   },
 
   "trading": {

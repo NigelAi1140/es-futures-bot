@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ES Futures Bot</title>
+<title>Oracle Trading System</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -55,7 +55,7 @@
   <div id="titlebar-left">
     <div class="tl-spacer"></div>
     <span class="title-logo">⬡</span>
-    <span class="title-name">ES FUTURES BOT</span>
+    <span class="title-name">ORACLE TRADING SYSTEM</span>
     <span class="title-ver" id="app-version"></span>
   </div>
   <div id="titlebar-right">
@@ -94,156 +94,71 @@
       <button class="wbtn wbtn-close" onclick="closeSettings()" style="-webkit-app-region:no-drag">✕</button>
     </div>
 
-    <!-- Pass rate meter (TopstepX only) -->
-    <div class="pass-meter-wrap" id="pass-meter-wrap">
-      <div class="pass-meter-row">
-        <span class="pass-meter-label">EST. COMBINE PASS RATE</span>
-        <span class="pass-meter-pct" id="pass-pct">—</span>
-      </div>
-      <div class="pass-meter-bar-bg">
-        <div class="pass-meter-bar-fill" id="pass-bar"></div>
-      </div>
-      <div class="pass-meter-note">Based on 3-year ES backtest · Recommended settings = 88.8%</div>
-    </div>
+    <div class="settings-body settings-body-v2">
 
-    <!-- Paper trading badge (Alpaca only) -->
-    <div class="pass-meter-wrap" id="paper-mode-badge" hidden>
-      <div class="pass-meter-row">
-        <span class="pass-meter-label">ALPACA PAPER TRADING</span>
-        <span class="pass-meter-pct">MES</span>
-      </div>
-      <div class="pass-meter-note">No combine rules · Dollar limits auto-scaled to MES tick value (÷10)</div>
-    </div>
-
-    <div class="settings-body">
-      <!-- Left column -->
-      <div class="settings-col">
-        <div class="settings-section-label">RISK</div>
-        <label class="field-row">
-          <span class="field-k">Daily Loss Limit</span>
-          <span class="field-unit">$<input class="field-v" type="number" id="cfg-daily-loss" min="1" max="5000" placeholder="1400" oninput="updatePassMeter()"></span>
-          <span class="field-rec" data-rec-topstep="REC $1,400" data-rec-alpaca="REC $140">REC $1,400</span>
-        </label>
-        <label class="field-row">
-          <span class="field-k">Daily Profit Cap</span>
-          <span class="field-unit">$<input class="field-v" type="number" id="cfg-profit-cap" min="1" max="5000" placeholder="2000" oninput="updatePassMeter()"></span>
-          <span class="field-rec" data-rec-topstep="REC $2,000" data-rec-alpaca="REC $200">REC $2,000</span>
-        </label>
-        <label class="field-row">
-          <span class="field-k">Max Contracts</span>
-          <input class="field-v field-v-sm" type="number" id="cfg-contracts" min="1" max="10" placeholder="2" oninput="updatePassMeter()">
-          <span class="field-rec" data-rec-topstep="REC 2" data-rec-alpaca="REC 1">REC 2</span>
-        </label>
-
-        <label class="field-row">
-          <span class="field-k">Funded Start Bal</span>
-          <span class="field-unit" style="font-size:11px;color:var(--text-muted,#888);padding:4px 0">Auto (detected on connect)</span>
-        </label>
-
-        <div class="settings-section-label" style="margin-top:18px">ORDERS</div>
-
-        <!-- Stop mode toggle -->
-        <div class="field-row" style="margin-bottom:12px">
-          <span class="field-k">Stop Mode</span>
-          <div class="stop-mode-pill" id="stop-mode-pill">
-            <button class="smp-btn active" data-mode="trail" onclick="setStopMode('trail')">TRAIL</button>
-            <button class="smp-btn" data-mode="fixed" onclick="setStopMode('fixed')">FIXED</button>
-          </div>
-        </div>
-
-        <!-- Trail stop fields (shown when mode = trail) -->
-        <div id="stop-fields-trail">
-          <label class="field-row">
-            <span class="field-k">Trail Distance</span>
-            <input class="field-v field-v-sm" type="number" id="cfg-trail" min="4" max="20" placeholder="8" oninput="updatePassMeter()">
-            <span class="field-rec">REC 8</span>
-          </label>
-        </div>
-
-        <!-- Fixed stop fields (shown when mode = fixed) -->
-        <div id="stop-fields-fixed" style="display:none">
-          <label class="field-row">
-            <span class="field-k">Stop Loss Ticks</span>
-            <input class="field-v field-v-sm" type="number" id="cfg-stop" min="5" max="30" placeholder="13" oninput="updatePassMeter()">
-            <span class="field-rec">REC 13</span>
-          </label>
-          <label class="field-row">
-            <span class="field-k">Max Stop Ticks</span>
-            <input class="field-v field-v-sm" type="number" id="cfg-max-stop" min="10" max="60" oninput="updatePassMeter()">
-            <span class="field-rec">REC 20</span>
-          </label>
-        </div>
-
-        <label class="field-row">
-          <span class="field-k">Take Profit Ticks</span>
-          <input class="field-v field-v-sm" type="number" id="cfg-tp" min="20" max="100" placeholder="42" oninput="updatePassMeter()">
-          <span class="field-rec">REC 42</span>
-        </label>
+      <!-- MARKET -->
+      <div class="settings-section-label">MARKET</div>
+      <div class="mkt-checks-row">
+        <label class="mkt-check-label"><input type="checkbox" id="cfg-mkt-es" onchange="onMarketCheck('es',this.checked)"> <span>ES</span></label>
+        <label class="mkt-check-label"><input type="checkbox" id="cfg-mkt-nq" onchange="onMarketCheck('nq',this.checked)"> <span>NQ</span></label>
       </div>
 
-      <!-- Right column -->
-      <div class="settings-col">
-        <div class="settings-section-label">STRATEGIES</div>
-        <div id="settings-strategies">
-          <!-- Populated by JS from loaded config -->
-        </div>
+      <!-- STRATEGIES (read-only) -->
+      <div class="settings-section-label" style="margin-top:14px">ACTIVE STRATEGIES</div>
+      <div id="settings-strats-display" class="strats-display-wrap"></div>
 
-        <div class="settings-section-label" style="margin-top:18px">TREND FILTER</div>
-        <label class="field-row">
-          <span class="field-k">Enabled</span>
-          <input class="field-toggle" type="checkbox" id="cfg-trend-enabled" onchange="updatePassMeter()">
-          <span class="field-rec">REC ON</span>
-        </label>
-        <label class="field-row">
-          <span class="field-k">Uptrend Pts</span>
-          <input class="field-v field-v-sm" type="number" id="cfg-trend-up" min="3" max="30" placeholder="15" oninput="updatePassMeter()">
-          <span class="field-rec">REC 15</span>
-        </label>
-        <label class="field-row">
-          <span class="field-k">Downtrend Pts</span>
-          <input class="field-v field-v-sm" type="number" id="cfg-trend-dn" min="3" max="30" placeholder="6" oninput="updatePassMeter()">
-          <span class="field-rec">REC 6</span>
-        </label>
-
-        <div class="settings-section-label" style="margin-top:18px">REGIME FILTER</div>
-        <label class="field-row">
-          <span class="field-k">Direction</span>
-          <select class="field-v" id="cfg-regime-filter" style="width:auto;padding:2px 4px">
-            <option value="auto">Auto (Recommended) — EMA200 trend</option>
-            <option value="bull">Bull Only — long trades only</option>
-            <option value="bear">Bear Only — short trades only</option>
-          </select>
-        </label>
-
-        <!-- Accounts section (TopstepX only) -->
-        <div id="settings-accounts-section">
-          <div class="settings-section-label" style="margin-top:18px">ACCOUNTS</div>
-          <div id="settings-accounts-list"></div>
-          <div id="acct-add-row" style="display:none;align-items:center;gap:6px;margin-top:4px">
-            <input class="field-v field-v-sm" type="text" id="acct-add-last4" placeholder="last 4 digits" maxlength="4" style="width:88px">
-            <button class="btn-secondary" style="padding:2px 8px;font-size:10px" onclick="fetchAndAddAccount()">SEARCH</button>
-            <span id="acct-add-msg" style="font-size:10px;color:var(--green-lo)"></span>
-          </div>
-          <button class="btn-secondary" id="btn-add-acct" style="margin-top:6px;padding:2px 10px;font-size:10px" onclick="showAddAccountRow()">+ ADD</button>
-        </div>
+      <!-- RISK -->
+      <div class="settings-section-label" style="margin-top:14px">RISK</div>
+      <div id="acct-size-banner" class="acct-size-banner" style="display:none"></div>
+      <div id="acct-size-manual-row" class="acct-size-manual-row" style="display:none">
+        <span class="field-k" style="font-size:10px;opacity:0.65">Account size</span>
+        <select class="field-v" id="cfg-acct-size" onchange="onAcctSizeChange(this.value)" style="width:auto;padding:2px 6px;font-size:10px">
+          <option value="">Select…</option>
+          <option value="50000">50K</option>
+          <option value="100000">100K</option>
+          <option value="150000">150K</option>
+        </select>
       </div>
-    </div>
+      <label class="field-row">
+        <span class="field-k">Max Contracts</span>
+        <input class="field-v field-v-sm" type="number" id="cfg-contracts" min="1" max="15" placeholder="2">
+        <span class="field-rec" id="rec-contracts">—</span>
+      </label>
+      <label class="field-row">
+        <span class="field-k">Daily Loss Limit</span>
+        <span class="field-unit">$<input class="field-v" type="number" id="cfg-daily-loss" min="100" max="10000" placeholder="750"></span>
+        <span class="field-rec" id="rec-daily-loss">—</span>
+      </label>
+      <label class="field-row">
+        <span class="field-k">Daily Profit Cap</span>
+        <span class="field-unit">$<input class="field-v" type="number" id="cfg-profit-cap" min="100" max="20000" placeholder="1500"></span>
+        <span class="field-rec" id="rec-profit-cap">—</span>
+      </label>
 
-    <!-- Notifications row -->
-    <div style="padding:0 20px 4px;display:flex;align-items:center;gap:0">
-      <div class="settings-section-label" style="margin:0 14px 0 0;white-space:nowrap">NOTIFICATIONS</div>
-      <label class="field-row" style="margin:0;flex:1">
+      <!-- ACCOUNTS -->
+      <div class="settings-section-label" style="margin-top:14px">ACCOUNTS</div>
+      <div id="settings-accounts-list"></div>
+      <div id="acct-add-row" style="display:none;align-items:center;gap:6px;margin-top:4px">
+        <input class="field-v field-v-sm" type="text" id="acct-add-last4" placeholder="last 4 digits" maxlength="4" style="width:88px">
+        <button class="btn-secondary" style="padding:2px 8px;font-size:10px" onclick="fetchAndAddAccount()">SEARCH</button>
+        <span id="acct-add-msg" style="font-size:10px;color:var(--green-lo)"></span>
+      </div>
+      <button class="btn-secondary" id="btn-add-acct" style="margin-top:6px;padding:2px 10px;font-size:10px" onclick="showAddAccountRow()">+ ADD ACCOUNT</button>
+
+      <!-- NOTIFICATIONS -->
+      <div class="settings-section-label" style="margin-top:14px">NOTIFICATIONS</div>
+      <label class="field-row">
         <span class="field-k">NTFY Channel</span>
         <input class="field-v" type="text" id="cfg-ntfy" placeholder="your-topic-name" style="width:140px">
         <span class="field-rec" style="font-size:9px;opacity:0.7">ntfy.sh/…</span>
       </label>
+
     </div>
 
     <div class="settings-msg" id="settings-msg"></div>
 
     <div class="settings-footer">
-      <button class="btn-secondary" onclick="resetToRecommended()">RESET TO REC</button>
-      <button class="btn-secondary" onclick="closeSettings()">CANCEL</button>
+      <button class="btn-secondary" onclick="exportTradeHistory()" title="Download trades.csv">⬇ TRADE HISTORY</button>
       <button class="btn-primary btn-save" id="btn-save-cfg" onclick="saveSettings()">SAVE &amp; RESTART</button>
     </div>
   </div>
@@ -264,6 +179,11 @@
 
     <div id="account-list">
       <!-- Populated by JS -->
+    </div>
+    <div id="no-accounts-hint" hidden style="padding:10px 4px;color:var(--green-lo);font-size:11px;line-height:1.5">
+      No account connected.<br>
+      Open <b>Settings</b> → <b>Add Account</b><br>
+      to get started.
     </div>
 
     <div class="sidebar-label" style="margin-top:20px">SESSION</div>

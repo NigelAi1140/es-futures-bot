@@ -393,7 +393,7 @@ function logWeeklySummary(record) {
 // NQ_BB_SQUEEZE_L/S are NQ-only signals from nq-strategies.js — must be in this list
 // or they bypass the ENABLED_STRATEGIES whitelist filter entirely.
 // V5 NQ signals (Portfolio V5, 2026-09-10 quant rebuild — see nq-strategies.js header for methodology)
-const ACTIVE_STRATEGIES = ["DONCH15_L","VOLBO_L","VOLBO_S","EMA21_PULL_L","BO10_S","3BAR_BEAR_S","KELT_L","NQ_OB_FADE_L","NQ_OB_FADE_S","NQ_AM_VWAP_FADE_L","NQ_AM_VWAP_FADE_S","NQ_ADR_FADE_L","NQ_ADR_FADE_S","NQ_14H_REV_S","NQ_FIRST30_FADE_L","NQ_FIRST30_FADE_S","NQ_PM_VWAP_FADE_L","NQ_PM_VWAP_FADE_S","NQ_OVERNIGHT_TRAP_S"];
+const ACTIVE_STRATEGIES = ["DONCH15_L","VOLBO_L","VOLBO_S","EMA21_PULL_L","BO10_S","3BAR_BEAR_S","KELT_L","NQ_OB_FADE_L","NQ_OB_FADE_S","NQ_AM_VWAP_FADE_L","NQ_AM_VWAP_FADE_S","NQ_ADR_FADE_L","NQ_ADR_FADE_S","NQ_14H_REV_S","NQ_FIRST30_FADE_L","NQ_FIRST30_FADE_S","NQ_PM_VWAP_FADE_L","NQ_PM_VWAP_FADE_S","NQ_OVERNIGHT_TRAP_S","NQ_TIGHT_VWAP_AM_L","NQ_TIGHT_VWAP_AM_S","NQ_HILOW_REJ_AM_L","NQ_HILOW_REJ_AM_S","NQ_MOM_EXHAUST_AM_L","NQ_MOM_EXHAUST_AM_S","NQ_PULLBACK_AM_L","NQ_PULLBACK_AM_S"];
 function buildUserDisabledStrategies() {
   const env = process.env.ENABLED_STRATEGIES;
   if (!env) return [];
@@ -758,15 +758,25 @@ async function fetchBars(limit = 300, partial = false, lookbackHours = 48) {
   console.log(`[Bars] ${state.bars.length} bars loaded (latest: ${latestStr})`);
 
   // Bar stream log — write each confirmed-closed bar once for live vs backtest comparison
+  // Guard checks in-memory state AND the last line of the file to survive engine restarts
   if (!partial && latest && latest.time > (state._lastLoggedBarTime ?? 0)) {
-    state._lastLoggedBarTime = latest.time;
     const dateStr = new Date(latest.time * 1000).toISOString().slice(0, 10);
     const logPath = resolve(__dir, '..', 'logs', `bar-stream-${dateStr}.jsonl`);
-    const entry   = JSON.stringify({
-      t: new Date(latest.time * 1000).toISOString(),
-      o: latest.open, h: latest.high, l: latest.low, c: latest.close, v: latest.volume,
-    });
-    try { appendFileSync(logPath, entry + '\n'); } catch {}
+    const isoTime = new Date(latest.time * 1000).toISOString();
+    // Check file's last written timestamp to avoid duplicates across restarts
+    let alreadyLogged = false;
+    try {
+      const existing = readFileSync(logPath, 'utf8').trimEnd();
+      const lastLine = existing.slice(existing.lastIndexOf('\n') + 1);
+      if (lastLine) alreadyLogged = JSON.parse(lastLine).t === isoTime;
+    } catch {}
+    if (!alreadyLogged) {
+      state._lastLoggedBarTime = latest.time;
+      const entry = JSON.stringify({ t: isoTime, o: latest.open, h: latest.high, l: latest.low, c: latest.close, v: latest.volume });
+      try { appendFileSync(logPath, entry + '\n'); } catch {}
+    } else {
+      state._lastLoggedBarTime = latest.time;
+    }
   }
 }
 
@@ -1319,7 +1329,7 @@ function onPositionEvent(pos) {
 
       const now   = new Date();
       const hm    = now.getUTCHours() * 100 + now.getUTCMinutes();
-      const inAM  = hm >= 1345 && hm < 1455;   // 5 min buffer before AM close at 15:00
+      const inAM  = hm >= 1330 && hm < 1455;   // 5 min buffer before AM close at 15:00
       const inPM  = hm >= 1830 && hm < 2025;   // 5 min buffer before PM close at 20:30
       const inSession = inAM || inPM;
 
@@ -1962,6 +1972,30 @@ async function placeProtectiveOrders(entryOrderId, fillPrice) {
   // state.openTrades by exact orderId — eliminates RECOVERED classification after restarts
   persistOpenTrade({ entryOrderId, signalId, isLong, contracts, fillPrice,
     stopTicks, tpTicks, stopType, slId: slId || null, tpId: tpId || null });
+
+  // Log entry to trades.jsonl immediately — so if the bot crashes mid-trade and
+  // reconnects, the open position is already in the log and won't appear as ORPHANED.
+  const nowEntry = new Date();
+  logTrade({
+    timestamp:   nowEntry.toISOString(),
+    date:        nowEntry.toISOString().slice(0, 10),
+    time_mt:     mtTimeStr(nowEntry),
+    tax_year:    nowEntry.getUTCFullYear(),
+    contract:    (state.contractId ?? '').split('.').slice(-2).join('') || 'NQ',
+    contract_id: state.contractId,
+    signal:      signalId,
+    direction:   isLong ? 'long' : 'short',
+    contracts,
+    entry_price: +fillPrice.toFixed(2),
+    exit_price:  null,
+    gross_pnl:   null,
+    stop_ticks:  stopTicks,
+    tp_ticks:    tpTicks,
+    status:      'open',
+    entry_order_id: entryOrderId,
+    voided:      false,
+    section_1256: true,
+  });
 }
 
 // ─── Boot: open-position recovery ────────────────────────────────────────────
@@ -2104,17 +2138,22 @@ async function reconcileMissedTrades() {
     // The 13:30 UTC day-reset won't fire again after a mid-day restart, so we infer
     // the true start-of-day balance from the sum of today's closed trades.
     if (!state.dayContextRecovered && state.balance != null) {
-      let tradedPnL = 0;
+      let tradedPnL = 0, dayWins = 0, dayLosses = 0;
       for (const t of trades) {
         const p = t.profitAndLoss ?? 0;
-        if (p !== 0 && !t.voided) tradedPnL += p;
+        if (p !== 0 && !t.voided) {
+          tradedPnL += p;
+          if (p > 0) dayWins++; else dayLosses++;
+        }
       }
       const inferredStart = state.balance - tradedPnL;
       state.startOfDayBalance  = inferredStart;
       state.dayPnL             = tradedPnL;
+      state.dayWins            = dayWins;
+      state.dayLosses          = dayLosses;
       state.dayContextRecovered = true;
       writeSharedState(state.dayPnL);
-      console.log(`[Day] ♻️  Mid-day context recovered — day P&L: ${tradedPnL >= 0 ? '+' : ''}$${tradedPnL.toFixed(2)} | inferred start: $${inferredStart.toFixed(2)}`);
+      console.log(`[Day] ♻️  Mid-day context recovered — day P&L: ${tradedPnL >= 0 ? '+' : ''}$${tradedPnL.toFixed(2)} | wins: ${dayWins} | losses: ${dayLosses} | inferred start: $${inferredStart.toFixed(2)}`);
     }
 
     // Restore context from persisted state file if available (written on each entry fill)
@@ -2179,6 +2218,22 @@ async function reconcileMissedTrades() {
           section_1256:  true,
           note:          "recovered after restart — context unavailable",
         });
+        // Send win/loss notification for the orphaned trade
+        const _mkt = (process.env.MARKET ?? "es").toUpperCase();
+        const _dir = trade.side === 0 ? "LONG" : "SHORT";
+        if (pnl > 0) {
+          notify(
+            `✅ Winner +$${pnl.toFixed(0)} [recovered]`,
+            `[${_mkt}] ORPHANED ${_dir}\nDay P&L: $${state.dayPnL.toFixed(0)}  |  Recovered after restart`,
+            "default"
+          ).catch(() => {});
+        } else {
+          notify(
+            `❌ Loss -$${Math.abs(pnl).toFixed(0)} [recovered]`,
+            `[${_mkt}] ORPHANED ${_dir}\nDay P&L: $${state.dayPnL.toFixed(0)}  |  Recovered after restart`,
+            "default"
+          ).catch(() => {});
+        }
         continue;
       }
 
@@ -2531,7 +2586,7 @@ function runEvaluate() {
   // FOMC days: block non-NQ (directionless/whipsaw); NQ V5 fade signals are exempt —
   //   large FOMC moves are ideal fade setups and 8t stops bound the risk.
   const isNQ = CFG.contractSearch === "NQ";
-  const inAM = hm >= 1345 && hm < 1500 && (!state.isFOMCDay || isNQ);
+  const inAM = hm >= 1330 && hm < 1500 && (!state.isFOMCDay || isNQ);
   const inPM = hm >= 1800 && hm < 2000 && (!state.isFOMCDay || isNQ) && !isTodayEarlyClose();
   if (!inAM && !inPM) return;
 
@@ -2708,7 +2763,7 @@ function runEvaluate15() {
   const now = new Date();
   const hm  = now.getUTCHours() * 100 + now.getUTCMinutes();
 
-  const inAM = hm >= 1345 && hm < 1500 && !state.isFOMCDay;
+  const inAM = hm >= 1330 && hm < 1500 && !state.isFOMCDay;
   const inPM = hm >= 1830 && hm < 1900 && !state.isFOMCDay && !isTodayEarlyClose();
   if (!inAM && !inPM) return;
 
@@ -2782,27 +2837,30 @@ function runEvaluate15() {
 // ─── Pre-session brief ────────────────────────────────────────────────────────
 async function preSessionBrief() {
   // ── Engine health check — fire URGENT alert if anything looks wrong ──────
-  try {
-    const engineCount = parseInt(
-      execSync('pgrep -f "topstepx-engine.js" 2>/dev/null | wc -l').toString().trim(), 10
-    );
-    const svCount = parseInt(
-      execSync('pgrep -f "multi-account.mjs" 2>/dev/null | wc -l').toString().trim(), 10
-    );
-    const healthy = engineCount === 1 && svCount === 1;
-    if (!healthy) {
-      const msg = [
-        `🚨 ${engineCount} engine(s), ${svCount} supervisor(s) — expected 1 each`,
-        `Session opens in ~5 min — act NOW`,
-        `Fix: pm2 restart topstepx-all`,
-      ].join("\n");
-      await notify("🚨 ENGINE HEALTH ALERT", msg, "urgent");
-      console.error(`[Health] ❌ ALERT SENT — ${engineCount} engine(s), ${svCount} supervisor(s)`);
-    } else {
-      console.log(`[Health] ✅ 1 supervisor, 1 engine — clean`);
+  // pgrep is Unix-only; skip silently on Windows
+  if (process.platform !== 'win32') {
+    try {
+      const engineCount = parseInt(
+        execSync('pgrep -f "topstepx-engine.js" 2>/dev/null | wc -l').toString().trim(), 10
+      );
+      const svCount = parseInt(
+        execSync('pgrep -f "multi-account.mjs" 2>/dev/null | wc -l').toString().trim(), 10
+      );
+      const healthy = engineCount === 1 && svCount === 1;
+      if (!healthy) {
+        const msg = [
+          `🚨 ${engineCount} engine(s), ${svCount} supervisor(s) — expected 1 each`,
+          `Session opens in ~5 min — act NOW`,
+          `Fix: pm2 restart topstepx-all`,
+        ].join("\n");
+        await notify("🚨 ENGINE HEALTH ALERT", msg, "urgent");
+        console.error(`[Health] ❌ ALERT SENT — ${engineCount} engine(s), ${svCount} supervisor(s)`);
+      } else {
+        console.log(`[Health] ✅ 1 supervisor, 1 engine — clean`);
+      }
+    } catch (e) {
+      console.error("[Health] check failed:", e.message);
     }
-  } catch (e) {
-    console.error("[Health] check failed:", e.message);
   }
 
   const range  = calcOvernightRange();
@@ -3060,7 +3118,7 @@ async function tick() {
   // Fire in first 10 seconds after each 5m boundary (e.g. 13:50:00–13:50:09).
   if (min % 5 === 0 && sec <= 10 && bar5Bucket !== lastBar5Min) {
     lastBar5Min = bar5Bucket;
-    await Promise.all([fetchBars(300, false), fetchESBars()]).catch(console.error);  // confirmed closed bar
+    await Promise.all([fetchBars(300, false, 96), fetchESBars()]).catch(console.error);  // 96h spans Mon AM weekend gap
     await reconcilePositions().catch(console.error);
     runEvaluate();
   }
@@ -3211,7 +3269,7 @@ async function main() {
   console.log("[Boot] ✓ Engine running — waiting for session open");
   // contractId format: "CON.F.US.EP.U26" — extract the short name for the notification
   const contractShort = (state.contractId ?? "").split(".").slice(-2).join("") || CFG.contractSearch;
-  await notify("🟢 Engine online", `TopstepX engine started\nAccount: $${state.peakBalance?.toFixed(0)}\nContract: ${contractShort}  |  Max: ${CFG.maxContracts}ct\nAM session opens 7:45 ${isDST() ? "MDT" : "MST"}`, "low");
+  await notify("🟢 Engine online", `TopstepX engine started\nAccount: $${state.peakBalance?.toFixed(0)}\nContract: ${contractShort}  |  Max: ${CFG.maxContracts}ct\nAM session opens 7:30 ${isDST() ? "MDT" : "MST"}`, "low");
 }
 
 // Retry startup on transient failure — mirrors how the old v9 IB engine handled

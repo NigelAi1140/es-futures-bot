@@ -77,6 +77,25 @@ const state = {
 };
 
 let _settingsAccounts = [];  // working copy of broker.accounts while settings panel is open
+let _currentMarket = "es";  // "es" | "nq"
+
+const NQ_STRATS = {
+  NQ_OB_FADE_S:      { label: "OB FADE S",       session: "AM 13:30", tp: "40t", wr: 100, n: 5  },
+  NQ_AM_VWAP_FADE_S: { label: "AM VWAP FADE S",  session: "AM",       tp: "24t", wr: 100, n: 8  },
+  NQ_ADR_FADE_S:     { label: "ADR FADE S",       session: "AM",       tp: "32t", wr: 100, n: 4  },
+  NQ_14H_REV:        { label: "14H REVERSAL",     session: "AM 14+",   tp: "32t", wr: 100, n: 6  },
+  NQ_FIRST30_FADE_S: { label: "FIRST30 FADE S",   session: "AM 14+",   tp: "32t", wr: 100, n: 3  },
+  NQ_PM_VWAP_FADE_S: { label: "PM VWAP FADE S",   session: "PM",       tp: "28t", wr: 100, n: 12 },
+  NQ_ADR_EXHAUST_S:  { label: "ADR EXHAUST S",    session: "AM 14+",   tp: "24t", wr: 100, n: 2  },
+};
+
+const COMBINE_MAX_CT = { 50000: 5, 100000: 10, 150000: 15 };
+
+const SIZE_RECS = {
+  50000:  { contracts: 2, lossLimit: 750,  profitCap: 1500 },
+  100000: { contracts: 5, lossLimit: 1500, profitCap: 3000 },
+  150000: { contracts: 8, lossLimit: 2250, profitCap: 4500 },
+};
 
 /* ── DOM refs ─────────────────────────────────────────────────────────────── */
 const $acctList   = document.getElementById("account-list");
@@ -190,6 +209,7 @@ function getOrCreateCard(name) {
     `;
     $acctList.appendChild(card);
     state.accounts[name] = { pnl: null, balance: null, status: "starting" };
+    document.getElementById("no-accounts-hint").hidden = true;
   }
   return card;
 }
@@ -216,6 +236,7 @@ function updateAccountBalance(name, balance) {
   getOrCreateCard(name);
   const el = document.getElementById(`bal-${CSS.escape(name)}`);
   if (el) el.textContent = `$${balance}`;
+  if (state.accounts[name]) state.accounts[name].balance = balance;
 }
 
 function setAccountStatus(name, status) {
@@ -265,91 +286,164 @@ function setPausedUI(paused) {
 }
 
 /* ── Settings panel ───────────────────────────────────────────────────────── */
+function _detectAccountSize() {
+  for (const [name, acct] of Object.entries(state.accounts)) {
+    if (acct.balance) {
+      const b = parseFloat(String(acct.balance).replace(/[$,]/g, ''));
+      if (!isNaN(b) && b > 0) {
+        if (b < 75000)  return 50000;
+        if (b < 125000) return 100000;
+        return 150000;
+      }
+    }
+  }
+  for (const name of Object.keys(state.accounts)) {
+    const m = name.match(/(\d+)K/i);
+    if (m) {
+      const k = parseInt(m[1]);
+      if (k === 50)  return 50000;
+      if (k === 100) return 100000;
+      if (k === 150) return 150000;
+    }
+  }
+  return null;
+}
+
+function _applyAcctSizeRecs(size) {
+  const banner    = document.getElementById("acct-size-banner");
+  const manualRow = document.getElementById("acct-size-manual-row");
+  const rec = SIZE_RECS[size];
+  if (rec) {
+    const label = size === 50000 ? "50K" : size === 100000 ? "100K" : "150K";
+    if (banner)    { banner.textContent = `✓ ${label} account detected`; banner.style.display = "block"; }
+    if (manualRow) manualRow.style.display = "none";
+    const el = (id, val) => { const e = document.getElementById(id); if (e) e.textContent = val; };
+    el("rec-contracts",  `REC ${rec.contracts}`);
+    el("rec-daily-loss", `REC $${rec.lossLimit.toLocaleString()}`);
+    el("rec-profit-cap", `REC $${rec.profitCap.toLocaleString()}`);
+  } else {
+    if (banner)    banner.style.display = "none";
+    if (manualRow) manualRow.style.display = "flex";
+    ["rec-contracts","rec-daily-loss","rec-profit-cap"].forEach(id => {
+      const e = document.getElementById(id); if (e) e.textContent = "—";
+    });
+  }
+}
+
+function _renderStrategyDisplay(market) {
+  const container = document.getElementById("settings-strats-display");
+  if (!container) return;
+  container.innerHTML = "";
+  if (market === "nq") {
+    for (const [, info] of Object.entries(NQ_STRATS)) {
+      const row = document.createElement("div");
+      row.className = "strat-display-row";
+      row.innerHTML = `<span class="strat-disp-label">${info.label}</span><span class="strat-disp-sess">${info.session}</span><span class="strat-disp-tp">${info.tp}</span>`;
+      container.appendChild(row);
+    }
+  } else {
+    const note = document.createElement("div");
+    note.className = "strat-display-row";
+    note.style.opacity = "0.5";
+    note.textContent = "ES multi-strategy suite — managed by engine";
+    container.appendChild(note);
+  }
+}
+
+function onMarketCheck(mkt, checked) {
+  if (checked) {
+    const other = mkt === "es" ? "nq" : "es";
+    const otherEl = document.getElementById(`cfg-mkt-${other}`);
+    if (otherEl) otherEl.checked = false;
+    _currentMarket = mkt;
+    _renderStrategyDisplay(mkt);
+  } else {
+    document.getElementById(`cfg-mkt-${mkt}`).checked = true;
+  }
+}
+window.onMarketCheck = onMarketCheck;
+
+function onAcctSizeChange(val) {
+  const size = val ? Number(val) : null;
+  _applyAcctSizeRecs(size);
+  if (size && SIZE_RECS[size]) {
+    const rec = SIZE_RECS[size];
+    setValue("cfg-contracts",  rec.contracts);
+    setValue("cfg-daily-loss", rec.lossLimit);
+    setValue("cfg-profit-cap", rec.profitCap);
+  }
+}
+window.onAcctSizeChange = onAcctSizeChange;
+
 function openSettings() {
   const overlay = document.getElementById("overlay-settings");
-
-  const isAlpaca = state.fullConfig?.broker?.type === "alpaca";
-  const meterWrap = document.getElementById("pass-meter-wrap");
-  const paperBadge = document.getElementById("paper-mode-badge");
-  if (meterWrap)  meterWrap.hidden  = isAlpaca;
-  if (paperBadge) paperBadge.hidden = !isAlpaca;
-
-  // Update REC labels for Alpaca (MES scale) vs TopstepX (ES scale)
-  document.querySelectorAll("[data-rec-topstep]").forEach(el => {
-    el.textContent = isAlpaca ? el.dataset.recAlpaca : el.dataset.recTopstep;
-  });
-
-  // Populate from state.fullConfig if available, else from current sidebar values
   const cfg = state.fullConfig;
+  _currentMarket = cfg?.market ?? "nq";
+
+  // Market checkboxes (mutually exclusive)
+  const esEl = document.getElementById("cfg-mkt-es");
+  const nqEl = document.getElementById("cfg-mkt-nq");
+  if (esEl) esEl.checked = _currentMarket === "es";
+  if (nqEl) nqEl.checked = _currentMarket === "nq";
+
+  _renderStrategyDisplay(_currentMarket);
+
   if (cfg) {
     const t = cfg.trading ?? {};
-    const f = cfg.trendFilter ?? {};
-    const s = cfg.strategies ?? {};
-
     setValue("cfg-daily-loss", t.dailyLossLimit);
     setValue("cfg-profit-cap", t.dailyProfitCap);
     setValue("cfg-contracts",  t.contracts);
-    setValue("cfg-stop",       t.stopLossTicks);
-    setValue("cfg-max-stop",   t.maxStopTicks);
-    setValue("cfg-tp",         t.takeProfitTicks);
-    setValue("cfg-trail",      t.trailTicks);
-    setStopMode(t.stopMode ?? null);
-
-    setCheck("cfg-trend-enabled", f.enabled ?? true);
-    setValue("cfg-trend-up",  f.uptrendThreshold);
-    setValue("cfg-trend-dn",  f.downtrendThreshold);
-
-    const rfEl = document.getElementById("cfg-regime-filter");
-    if (rfEl) rfEl.value = t.regimeFilter ?? "auto";
-    // Build strategy toggles
-    const container = document.getElementById("settings-strategies");
-    container.innerHTML = "";
-    for (const [name, enabled] of Object.entries(s)) {
-      const label = document.createElement("label");
-      label.className = "strat-row";
-      label.innerHTML = `<input type="checkbox" data-strat="${name}"${enabled ? " checked" : ""}> ${name}`;
-      label.querySelector("input").addEventListener("change", updatePassMeter);
-      container.appendChild(label);
-    }
   }
 
-  // Accounts section (TopstepX only)
-  const acctSection = document.getElementById("settings-accounts-section");
-  if (acctSection) acctSection.style.display = isAlpaca ? "none" : "";
-  if (!isAlpaca && cfg) renderAccountsList(cfg.broker?.accounts ?? []);
+  const detectedSize = _detectAccountSize();
+  _applyAcctSizeRecs(detectedSize);
 
-  // NTFY channel
+  if (cfg) renderAccountsList(cfg.broker?.accounts ?? []);
+
   const ntfyEl = document.getElementById("cfg-ntfy");
   if (ntfyEl) ntfyEl.value = cfg?.notifications?.ntfyChannel ?? "";
 
   document.getElementById("settings-msg").textContent = "";
   overlay.removeAttribute("hidden");
-  updatePassMeter();
 }
 window.openSettings = openSettings;
 
 function resetToRecommended() {
-  const isAlpaca = state.fullConfig?.broker?.type === "alpaca";
-  setValue("cfg-daily-loss", isAlpaca ? 140  : 1400);
-  setValue("cfg-profit-cap", isAlpaca ? 200  : 2000);
-  setValue("cfg-contracts",  isAlpaca ? 1    : 1);
-  setValue("cfg-trail",      8);
-  setValue("cfg-stop",       10);
-  setValue("cfg-max-stop",   20);
-  setValue("cfg-tp",         48);
-  setStopMode(null);
-  setValue("cfg-trend-up",   10);
-  setValue("cfg-trend-dn",   6);
-  document.getElementById("cfg-trend-enabled").checked = true;
-  const rfEl = document.getElementById("cfg-regime-filter");
-  if (rfEl) rfEl.value = "auto";
-  updatePassMeter();
+  const size = _detectAccountSize();
+  const rec = SIZE_RECS[size] ?? SIZE_RECS[50000];
+  setValue("cfg-contracts",  rec.contracts);
+  setValue("cfg-daily-loss", rec.lossLimit);
+  setValue("cfg-profit-cap", rec.profitCap);
 }
 
 function closeSettings() {
   document.getElementById("overlay-settings").setAttribute("hidden", "");
 }
 window.closeSettings = closeSettings;
+
+async function exportTradeHistory() {
+  const msg = document.getElementById("settings-msg");
+  msg.textContent = "Exporting…";
+  try {
+    const result = await window.bot.exportTrades();
+    if (!result.ok) { msg.textContent = `⚠ ${result.error}`; return; }
+
+    const blob = new Blob([result.csv], { type: "text/csv" });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement("a");
+    a.href     = url;
+    a.download = `oracle-trades-${new Date().toISOString().slice(0,10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    msg.textContent = `✓ Exported ${result.count} trades`;
+    setTimeout(() => { msg.textContent = ""; }, 4000);
+  } catch (e) {
+    msg.textContent = `⚠ Export failed: ${e.message}`;
+  }
+}
+window.exportTradeHistory = exportTradeHistory;
 
 function renderAccountsList(accounts) {
   _settingsAccounts = accounts.map(a => ({ ...a }));
@@ -358,16 +452,41 @@ function renderAccountsList(accounts) {
   list.innerHTML = "";
   _settingsAccounts.forEach((acct, i) => {
     const row = document.createElement("div");
-    row.style.cssText = "display:flex;align-items:center;gap:6px;margin-bottom:4px";
-    row.innerHTML = `<span style="flex:1;font-size:11px;color:var(--green-hi);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${acct.name}">${acct.name}</span><span style="font-size:10px;color:var(--green-lo)">${acct.type}</span><button style="background:none;border:1px solid var(--green-lo);color:var(--green-lo);padding:1px 6px;cursor:pointer;font-size:11px" onclick="removeSettingsAccount(${i})">×</button>`;
+    row.className = "acct-settings-row";
+    const acctState = state.accounts[acct.name];
+    const connected = acctState && acctState.status !== 'starting' ? "✓" : "";
+    row.innerHTML = `
+      <span class="acct-row-name" title="${acct.name}">${acct.name}</span>
+      <span class="acct-row-type" style="color:var(--green-lo)">${connected}</span>
+      <span class="acct-row-type">${acct.type ?? ""}</span>
+      <button class="acct-row-remove" onclick="removeSettingsAccount(${i})">×</button>`;
     list.appendChild(row);
   });
-  // Reset add-row state
   const addRow = document.getElementById("acct-add-row");
   const addBtn = document.getElementById("btn-add-acct");
   if (addRow) addRow.style.display = "none";
   if (addBtn) addBtn.style.display = "";
 }
+
+function updateAccountCombineSize(i, val) {
+  _settingsAccounts[i].combineSize = val ? Number(val) : null;
+  if (_settingsAccounts[i].autoScale && val) {
+    const maxCt = COMBINE_MAX_CT[Number(val)] ?? 10;
+    setValue("cfg-contracts", maxCt);
+    updatePassMeter();
+  }
+}
+window.updateAccountCombineSize = updateAccountCombineSize;
+
+function toggleAccountAutoScale(i, checked) {
+  _settingsAccounts[i].autoScale = checked;
+  if (checked && _settingsAccounts[i].combineSize) {
+    const maxCt = COMBINE_MAX_CT[_settingsAccounts[i].combineSize] ?? 10;
+    setValue("cfg-contracts", maxCt);
+    updatePassMeter();
+  }
+}
+window.toggleAccountAutoScale = toggleAccountAutoScale;
 
 function removeSettingsAccount(i) {
   _settingsAccounts.splice(i, 1);
@@ -413,15 +532,13 @@ async function fetchAndAddAccount() {
 }
 window.fetchAndAddAccount = fetchAndAddAccount;
 
-function setStopMode(mode) {
-  document.getElementById("stop-fields-trail").style.display = mode === "trail" ? "" : "none";
-  document.getElementById("stop-fields-fixed").style.display = mode === "fixed" ? "" : "none";
-  document.querySelectorAll(".smp-btn").forEach(b => {
-    b.classList.toggle("active", b.dataset.mode === mode);
-  });
-  updatePassMeter();
-}
+function setStopMode() {}
 window.setStopMode = setStopMode;
+
+function setMarket(mkt) {
+  _currentMarket = mkt;
+}
+window.setMarket = setMarket;
 
 // ── Pass rate estimator ────────────────────────────────────────────────────────
 // Baseline 88.8% from V4 3-year ES backtest with recommended settings.
@@ -433,6 +550,19 @@ const REC = { contracts: 2, stop: 13, maxStop: 20, tp: 42, trail: 8,
 
 function updatePassMeter() {
   if (state.fullConfig?.broker?.type === "alpaca") return;
+
+  // NQ mode: show static backtest note, no computed ES pass rate
+  const noteEl = document.getElementById("pass-meter-note");
+  if (_currentMarket === "nq") {
+    if (noteEl) noteEl.textContent = "NQ V5.3 · Sep 2026 backtest · 100% WR (40 trades)";
+    const pctEl = document.getElementById("pass-pct");
+    const barEl = document.getElementById("pass-bar");
+    if (pctEl) { pctEl.textContent = "100%"; pctEl.className = "pass-meter-pct"; }
+    if (barEl) { barEl.style.width = "100%"; barEl.className = "pass-meter-bar-fill"; }
+    return;
+  }
+  if (noteEl) noteEl.textContent = "Based on 3-year ES backtest · Recommended settings = 88.8%";
+
   let score = 88.8;
 
   const contracts  = numVal("cfg-contracts")  || REC.contracts;
@@ -516,43 +646,21 @@ async function saveSettings() {
   msg.textContent = "Saving...";
   msg.style.color = "var(--green-lo)";
 
-  // Read form values
-  const activeMode = document.querySelector(".smp-btn.active")?.dataset.mode ?? "trail";
   const trading = {
     ...(state.fullConfig?.trading ?? {}),
-    stopMode:        activeMode,
-    dailyLossLimit:  numVal("cfg-daily-loss"),
-    dailyProfitCap:  numVal("cfg-profit-cap"),
-    contracts:       numVal("cfg-contracts"),
-    stopLossTicks:   numVal("cfg-stop"),
-    maxStopTicks:    numVal("cfg-max-stop"),
-    takeProfitTicks: numVal("cfg-tp"),
-    trailTicks:      numVal("cfg-trail"),
-    regimeFilter:        document.getElementById("cfg-regime-filter")?.value ?? "auto",
-    fundedStartBalance:  -1,  // auto-detected on first connect — no longer a manual field
+    stopMode:           null,
+    dailyLossLimit:     numVal("cfg-daily-loss"),
+    dailyProfitCap:     numVal("cfg-profit-cap"),
+    contracts:          numVal("cfg-contracts"),
+    fundedStartBalance: -1,
   };
 
-  const trendFilter = {
-    ...(state.fullConfig?.trendFilter ?? {}),
-    enabled:             document.getElementById("cfg-trend-enabled").checked,
-    uptrendThreshold:    numVal("cfg-trend-up"),
-    downtrendThreshold:  numVal("cfg-trend-dn"),
-  };
+  const newConfig = { ...state.fullConfig, trading, market: _currentMarket };
 
-  const strategies = {};
-  document.querySelectorAll("#settings-strategies input[data-strat]").forEach(el => {
-    strategies[el.dataset.strat] = el.checked;
-  });
-
-  const newConfig = { ...state.fullConfig, trading, trendFilter, strategies };
-
-  // Accounts (TopstepX only)
-  const isAlpacaSave = state.fullConfig?.broker?.type === "alpaca";
-  if (!isAlpacaSave && _settingsAccounts.length > 0) {
+  if (_settingsAccounts.length > 0) {
     newConfig.broker = { ...newConfig.broker, accounts: _settingsAccounts };
   }
 
-  // NTFY channel
   const ntfyVal = (document.getElementById("cfg-ntfy")?.value ?? "").trim();
   newConfig.notifications = { ...(newConfig.notifications ?? {}), ntfyChannel: ntfyVal, enabled: !!ntfyVal };
 
@@ -563,10 +671,10 @@ async function saveSettings() {
     msg.textContent = "Saved. Restarting engines...";
     msg.style.color = "var(--amber)";
 
-    // Pause existing engines, then resume (main reloads config from disk)
     await window.bot.pauseAll();
     await new Promise(r => setTimeout(r, 1500));
     await window.bot.resumeAll();
+    setPausedUI(false); // ensure pause state is reset even if engine-resumed event was missed
 
     msg.textContent = "Done. Engines restarted with new settings.";
     msg.style.color = "var(--green-hi)";
@@ -628,6 +736,8 @@ if (window.bot) {
     const s  = cfg.strategies ?? {};
     const tf = cfg.trendFilter ?? {};
 
+    _currentMarket = cfg.market ?? "es";
+
     $contracts.textContent = t.contracts ? `${t.contracts}ct` : "—";
     $sltp.textContent      = (t.stopLossTicks && t.takeProfitTicks)
       ? `${t.stopLossTicks}t / ${t.takeProfitTicks}t`
@@ -636,13 +746,15 @@ if (window.bot) {
     $profitCap.textContent = t.dailyProfitCap  ? `$${t.dailyProfitCap}` : "—";
 
     const stratCount = Object.values(s).filter(Boolean).length;
-    $stratCt.textContent = `${stratCount} active`;
+    $stratCt.textContent = `${stratCount} active · ${_currentMarket.toUpperCase()}`;
 
-    if (cfg.accounts) {
+    if (cfg.accounts && cfg.accounts.length > 0) {
       cfg.accounts.forEach(name => {
         getOrCreateCard(name);
         setAccountStatus(name, "active");
       });
+    } else {
+      document.getElementById("no-accounts-hint").hidden = false;
     }
 
     // Fetch and store the full config for the settings panel
@@ -664,7 +776,12 @@ if (window.bot) {
   });
 
   window.bot.on("pnl-update",    ({ account, pnl })     => updateAccountPnl(account, pnl));
-  window.bot.on("balance-update",({ account, balance })  => updateAccountBalance(account, balance));
+  window.bot.on("balance-update",({ account, balance })  => {
+    updateAccountBalance(account, balance);
+    if (!state.accounts[account] || state.accounts[account].status === 'starting') {
+      setAccountStatus(account, 'active');
+    }
+  });
 
   window.bot.on("account-halted", ({ account }) => {
     setAccountStatus(account, "halted");
@@ -862,7 +979,7 @@ async function runIntro() {
 async function _startupGlitch() {
   await _iSleep(300);
   const titleEl = document.querySelector(".title-name");
-  if (titleEl) await glitchReveal(titleEl, "ES FUTURES BOT", { speed: 3, frameMs: 35 });
+  if (titleEl) await glitchReveal(titleEl, "ORACLE TRADING SYSTEM", { speed: 3, frameMs: 35 });
   const verEl = document.getElementById("app-version");
   if (verEl) {
     const raw = await window.bot.getVersion().catch(() => "?");
