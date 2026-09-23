@@ -1570,48 +1570,12 @@ function calcContracts() {
     base = Math.min(CFG.maxContracts, combineMax);
   }
 
-  // ── Layer 0b: ATR volatility boost ───────────────────────────────────────
-  // Backtest 2022-2026: ATR 2.5+ = 25%WR / +$50/tr. ATR 2.0-2.5 = 31%WR / +$106/tr.
-  // When market has real range, press size by 1ct — volatility is the edge's fuel.
-  const curATR = currentATR();
-  if (curATR !== null && curATR >= 2.5) base = Math.min(Math.max(CFG.maxContracts, base), base + 1);
-
-  // ── Layer 0c: Thursday edge boost ────────────────────────────────────────
-  // Thursday AM shorts: 37.1%WR / +$123/tr — highest-edge session across all days.
-  // Overall Thursday: 27.2%WR / +$42/tr / +$2,028/yr. Add 1ct to capitalise.
-  if (new Date().getUTCDay() === 4) base = Math.min(Math.max(CFG.maxContracts, base), base + 1);
-
-  // ── Layer 1: Overnight range regime ───────────────────────────────────────
-  const range = calcOvernightRange();
-  let regimeMult = 1.0;
-  if (range != null) {
-    if (range < 30)      regimeMult = 0.50;  // TIGHT  🔴 — choppy expected
-    else if (range < 50) regimeMult = 0.75;  // NARROW 🟡 — below average
-    // else WIDE 🟢 — full size
-  }
-
-  // ── Layer 2: Win/loss streak confidence ───────────────────────────────────
-  // Capitalise on what's working; pull back when it isn't
-  let streakMult = 1.0;
-  if (state.consecutiveWins >= 3 && state.dayPnL > 0) {
-    streakMult = 1.50;   // 3+ wins and in profit today — press the edge
-  } else if (state.consecutiveWins >= 1) {
-    streakMult = 1.25;   // momentum building
-  } else if (state.consecutiveLosses >= 2) {
-    streakMult = 0.50;   // something not working — cut size in half
-  } else if (state.consecutiveLosses >= 1) {
-    streakMult = 0.75;   // one loss — slight reduction
-  }
-
-  // ── Layer 3: ATR thin-market cap ─────────────────────────────────────────
-  // Very low ATR = unusually thin/choppy market (holiday-adjacent, pre-news freeze).
-  // Cap at 1ct regardless of streak/regime — backtest shows these days underperform.
+  // ── Thin-market cap ───────────────────────────────────────────────────────
+  // ATR < 3.0 = no range, edge doesn't work — cap at 1ct regardless of cushion.
   const sessionATR = calcSessionOpenATR();
-  const thinMarket = sessionATR !== null && sessionATR < 3.0;
+  if (sessionATR !== null && sessionATR < 3.0) return 1;
 
-  // ── Combined (all hard caps take priority over streak/regime) ─────────────
-  if (thinMarket) return 1;
-  return Math.max(1, Math.min(base, Math.round(base * regimeMult * streakMult)));
+  return Math.max(1, base);
 }
 
 function calcContractsVerbose() {
@@ -1650,27 +1614,11 @@ function calcContractsVerbose() {
     base = Math.min(CFG.maxContracts, combineMax);
   }
 
-  const curATRv = currentATR();
-  if (curATRv !== null && curATRv >= 2.5) base = Math.min(Math.max(CFG.maxContracts, base), base + 1);
-  if (new Date().getUTCDay() === 4) base = Math.min(Math.max(CFG.maxContracts, base), base + 1);
-  const range = calcOvernightRange();
-  let regimeMult = 1.0, regimeLabel = "🟢 WIDE";
-  if (range != null) {
-    if (range < 30)      { regimeMult = 0.50; regimeLabel = "🔴 TIGHT"; }
-    else if (range < 50) { regimeMult = 0.75; regimeLabel = "🟡 NARROW"; }
-  }
-  let streakMult = 1.0, streakLabel = "neutral";
-  if (state.consecutiveWins >= 3 && state.dayPnL > 0)  { streakMult = 1.50; streakLabel = `${state.consecutiveWins}W streak 🔥`; }
-  else if (state.consecutiveWins >= 1)                  { streakMult = 1.25; streakLabel = `${state.consecutiveWins}W streak ↑`; }
-  else if (state.consecutiveLosses >= 2)                { streakMult = 0.50; streakLabel = `${state.consecutiveLosses}L streak ⚠️`; }
-  else if (state.consecutiveLosses >= 1)                { streakMult = 0.75; streakLabel = `${state.consecutiveLosses}L streak ↓`; }
   const sessionATR = calcSessionOpenATR();
   const thinMarket = sessionATR !== null && sessionATR < 3.0;
-  if (thinMarket) regimeLabel += `  ⚠️ THIN ATR(${sessionATR.toFixed(2)}) — capped 1ct`;
-  const contracts = thinMarket
-    ? 1
-    : Math.max(1, Math.min(base, Math.round(base * regimeMult * streakMult)));
-  return { contracts, regimeLabel, streakLabel, regimeMult, streakMult };
+  const contracts  = thinMarket ? 1 : Math.max(1, base);
+  const regimeLabel = thinMarket ? `⚠️ THIN ATR(${sessionATR?.toFixed(2)}) — capped 1ct` : "🟢 cushion-scaled";
+  return { contracts, regimeLabel, streakLabel: "—", regimeMult: 1.0, streakMult: 1.0 };
 }
 
 // ─── Order placement ──────────────────────────────────────────────────────────
