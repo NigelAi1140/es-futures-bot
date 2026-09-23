@@ -402,7 +402,7 @@ const IS_MULTI       = process.env.MULTI_ACCOUNT === "1";
 // Stagger entry per account so all 4 combines don't hit the same tick simultaneously.
 // Combine-1 → 0ms, Combine-2 → 2500ms, Combine-3 → 5000ms, Combine-4 → 7500ms.
 const ACCOUNT_LABEL  = process.env.ACCOUNT_LABEL ?? "";
-const ACCOUNT_IDX    = Math.max(0, (parseInt(ACCOUNT_LABEL.replace(/\D/g, "").slice(-1)) || 1) - 1);
+const ACCOUNT_IDX    = Math.max(0, (parseInt(ACCOUNT_LABEL.replace(/\D/g, "")) || 1) - 1);
 const ENTRY_STAGGER_MS = ACCOUNT_IDX * 2500;
 function emitBundleEvent(type, data) {
   if (IS_MULTI) process.stdout.write(`[BUNDLE] ${JSON.stringify({ type, ...data })}\n`);
@@ -2096,8 +2096,8 @@ async function recoverOpenPosition() {
     notify(`⚠️ Untracked position found`, `Open ${posIsLong ? "LONG" : "SHORT"} ${openPos.size ?? "?"}ct — no persisted context. Placing emergency SL/TP now.`, "urgent").catch(() => {});
 
     const syntheticId = `orphan-boot-${Date.now()}`;
-    // Use average open price from position API if available, otherwise current price
-    const avgPrice = openPos.avgPrice ?? openPos.averagePrice ?? state.balance;
+    // Use average open price from position API if available; never fall back to account balance
+    const avgPrice = openPos.avgPrice ?? openPos.averagePrice ?? null;
     state.activeDirections.add(posIsLong ? "long" : "short");
     state.openTrades.set(syntheticId, {
       signalId:     "ORPHAN",
@@ -2105,7 +2105,7 @@ async function recoverOpenPosition() {
       contracts:    openPos.size ?? 1,
       isProtective: false,
       protected:    false,
-      stopTicks:    CFG.stopLossTicks,
+      stopTicks:    CFG.stopTicks,
       tpTicks:      CFG.tpTicks,
       stopType:     "trail",
     });
@@ -2226,6 +2226,16 @@ async function reconcileMissedTrades() {
       if (gatesRestored) {
         console.log(`[Gates] ♻️  Session gates restored — noShorts=${state.noShortsToday} noLongs=${state.noLongsToday} halted=${state.haltedToday} cooldownUntil=${state.cooldownUntil > Date.now() ? new Date(state.cooldownUntil).toISOString() : "none"}`);
       }
+      // Check DLL/profit-cap against recovered dayPnL (orphaned trades won't call onTradeEvent)
+      if (!state.haltedToday && state.dayPnL <= -CFG.dailyLossLimit) {
+        state.haltedToday = true;
+        console.log(`[Day] 🛑 DLL reached in recovery (dayPnL $${state.dayPnL.toFixed(2)}) — halted for today`);
+        saveSessionGates(state);
+      } else if (!state.profitCappedToday && state.dayPnL >= CFG.dailyProfitCap) {
+        state.profitCappedToday = true;
+        console.log(`[Day] 🏁 Profit cap reached in recovery (dayPnL $${state.dayPnL.toFixed(2)}) — no more trades today`);
+        saveSessionGates(state);
+      }
     }
 
     // Restore context from persisted state file if available (written on each entry fill)
@@ -2311,6 +2321,10 @@ async function reconcileMissedTrades() {
 
       const dirLabel = isLong === true ? "LONG" : isLong === false ? "SHORT" : "?";
       console.warn(`[Recovery] ♻️  Replaying missed trade ${tid} — P&L $${pnl.toFixed(2)} ${signalId} ${dirLabel}`);
+
+      // dayPnL was already set by the recovery block above (sum of all trades).
+      // onTradeEvent will re-add pnl, so subtract it first to avoid double-counting.
+      state.dayPnL -= pnl;
 
       const normalized = {
         id:             tid,
@@ -2836,8 +2850,8 @@ function runEvaluate15() {
   const now = new Date();
   const hm  = now.getUTCHours() * 100 + now.getUTCMinutes();
 
-  const inAM = hm >= 1330 && hm < 1500 && !state.isFOMCDay;
-  const inPM = hm >= 1830 && hm < 1900 && !state.isFOMCDay && !isTodayEarlyClose();
+  const inAM = hm >= 1330 && hm < 1500 && (!state.isFOMCDay || isNQ);
+  const inPM = hm >= 1800 && hm < 2000 && (!state.isFOMCDay || isNQ) && !isTodayEarlyClose();
   if (!inAM && !inPM) return;
 
   // Monday PM filter (mirrors 5m path)
@@ -2900,6 +2914,8 @@ function runEvaluate15() {
       tpTicks:   sig.tpTicks ?? CFG15m.tpTicks,   // per-strategy TP override from strategies.js
       stopType:  CFG15m.stopType,
       tf:        "15m",
+    }).then(result => {
+      if (result === null) state.activeDirections.delete(dir);
     }).catch(err => {
       console.error("[Order] 15m entry error:", err.message);
       state.activeDirections.delete(dir);
