@@ -1617,7 +1617,12 @@ function calcContractsVerbose() {
   const sessionATR = calcSessionOpenATR();
   const thinMarket = sessionATR !== null && sessionATR < 3.0;
   const contracts  = thinMarket ? 1 : Math.max(1, base);
-  const regimeLabel = thinMarket ? `⚠️ THIN ATR(${sessionATR?.toFixed(2)}) — capped 1ct` : "🟢 cushion-scaled";
+  const cushionAmt = (state.balance != null && state.peakBalance != null)
+    ? Math.round(state.balance - (state.peakBalance - CFG.trailDD))
+    : null;
+  const regimeLabel = thinMarket
+    ? `⚠️ THIN ATR(${sessionATR?.toFixed(2)}) — capped 1ct`
+    : `🟢 ${contracts}ct  |  cushion $${cushionAmt ?? "?"}`;
   return { contracts, regimeLabel, streakLabel: "—", regimeMult: 1.0, streakMult: 1.0 };
 }
 
@@ -2897,6 +2902,7 @@ function runEvaluate15() {
 async function preSessionBrief() {
   // ── Engine health check — fire URGENT alert if anything looks wrong ──────
   // pgrep is Unix-only; skip silently on Windows
+  let engineHealthLine = "✅ running";
   if (process.platform !== 'win32') {
     try {
       const engineCount = parseInt(
@@ -2907,6 +2913,7 @@ async function preSessionBrief() {
       );
       const healthy = engineCount === 1 && svCount === 1;
       if (!healthy) {
+        engineHealthLine = `🚨 ${engineCount} engine(s) ${svCount} supervisor(s) — restart needed`;
         const msg = [
           `🚨 ${engineCount} engine(s), ${svCount} supervisor(s) — expected 1 each`,
           `Session opens in ~5 min — act NOW`,
@@ -2918,6 +2925,7 @@ async function preSessionBrief() {
         console.log(`[Health] ✅ 1 supervisor, 1 engine — clean`);
       }
     } catch (e) {
+      engineHealthLine = "⚠️ health check failed";
       console.error("[Health] check failed:", e.message);
     }
   }
@@ -3012,14 +3020,12 @@ async function preSessionBrief() {
 
   // Single-account phone notification
   const briefMsg = [
-    `Regime: ${regimeLabel}  |  ${contracts}ct / ${CFG.maxContracts}ct max`,
-    `Streak: ${streakLabel}`,
+    `Engine: ${engineHealthLine}  |  ${contracts}ct  |  News: ${state._newsBlocks?.length || 0}  |  FOMC: ${state.isFOMCDay ? "YES ⚠️" : "No"}`,
     balance != null ? `Balance: $${balance.toFixed(0)}${ddBuffer != null ? `  |  DD buffer: $${ddBuffer}` : ""}` : null,
     state.simulated && profitSoFar != null
       ? `Combine: $${profitSoFar.toFixed(0)} / $${CFG.combineTarget.toFixed(0)}  ($${Math.max(0, CFG.combineTarget - profitSoFar).toFixed(0)} to go)`
       : null,
-    `Engine: ✅ 1 running  |  News: ${state._newsBlocks?.length || 0}  |  FOMC: ${state.isFOMCDay ? "YES ⚠️" : "No"}`,
-    `Trend: ${bundlePayload.trendStatus}`,
+    `Trend: ${bundlePayload.trendStatus}  |  ${regimeLabel}`,
     volPct != null ? `Vol: ${volPct}% of avg ${volPct >= 120 ? "✅" : volPct >= 80 ? "⚠️" : "🔇"}` : null,
     `AM 7:45 ${bundlePayload.tz}  |  PM 12:30–2:00`,
   ].filter(Boolean).join("\n");
