@@ -2900,33 +2900,31 @@ function runEvaluate15() {
 
 // ─── Pre-session brief ────────────────────────────────────────────────────────
 async function preSessionBrief() {
-  // ── Engine health check — fire URGENT alert if anything looks wrong ──────
-  // pgrep is Unix-only; skip silently on Windows
+  // ── Engine health check — verify actual engine state, not process count ──
+  // pgrep from inside Node.js on macOS can't see sibling processes (only children),
+  // so it always returns 0 and triggers false alerts. Check real state instead.
   let engineHealthLine = "✅ running";
-  if (process.platform !== 'win32') {
-    try {
-      const engineCount = parseInt(
-        execSync('pgrep -f "topstepx-engine.js" 2>/dev/null | wc -l').toString().trim(), 10
-      );
-      const svCount = parseInt(
-        execSync('pgrep -f "multi-account.mjs" 2>/dev/null | wc -l').toString().trim(), 10
-      );
-      const healthy = engineCount === 1 && svCount === 1;
-      if (!healthy) {
-        engineHealthLine = `🚨 ${engineCount} engine(s) ${svCount} supervisor(s) — restart needed`;
-        const msg = [
-          `🚨 ${engineCount} engine(s), ${svCount} supervisor(s) — expected 1 each`,
-          `Session opens in ~5 min — act NOW`,
-          `Fix: pm2 restart topstepx-all`,
-        ].join("\n");
-        await notify("🚨 ENGINE HEALTH ALERT", msg, "urgent");
-        console.error(`[Health] ❌ ALERT SENT — ${engineCount} engine(s), ${svCount} supervisor(s)`);
-      } else {
-        console.log(`[Health] ✅ 1 supervisor, 1 engine — clean`);
-      }
-    } catch (e) {
-      engineHealthLine = "⚠️ health check failed";
-      console.error("[Health] check failed:", e.message);
+  {
+    const hubOk   = state.hub?.state === 1;          // HubConnectionState.Connected = 1
+    const acctOk  = !!state.accountId;
+    const barsOk  = state.bars?.length >= 10;
+    const healthy = hubOk && acctOk && barsOk;
+    if (!healthy) {
+      const reasons = [
+        !hubOk  && "SignalR disconnected",
+        !acctOk && "account not loaded",
+        !barsOk && `bars thin (${state.bars?.length ?? 0})`,
+      ].filter(Boolean).join(", ");
+      engineHealthLine = `🚨 ${reasons} — restart needed`;
+      const msg = [
+        `🚨 Engine unhealthy at session open`,
+        reasons,
+        `Fix: pm2 restart topstepx-all`,
+      ].join("\n");
+      await notify("🚨 ENGINE HEALTH ALERT", msg, "urgent");
+      console.error(`[Health] ❌ ALERT SENT — ${reasons}`);
+    } else {
+      console.log(`[Health] ✅ hub connected, account loaded, ${state.bars.length} bars — clean`);
     }
   }
 
