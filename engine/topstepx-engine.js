@@ -2867,8 +2867,8 @@ function runEvaluate15() {
     if (!CFG15m.allowedStrategies.has(root)) return false;
     if (CFG.pausedStrategies.some(p => sig.id.startsWith(p))) return false;
     const dir = sig.side === "long" ? "long" : "short";
-    if (state.noShortsToday && dir === "short" && !sig.ignoreTrendFilter) return false;
-    if (state.noLongsToday && dir === "long" && !sig.ignoreTrendFilter) {
+    if (inAM && state.noShortsToday && dir === "short" && !sig.ignoreTrendFilter) return false;
+    if (inAM && state.noLongsToday && dir === "long" && !sig.ignoreTrendFilter) {
       if (state.sessionLongWon && state.sessionLongCount < 2) return true;  // bypass: first long won
       return false;
     }
