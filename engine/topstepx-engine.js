@@ -1547,14 +1547,27 @@ function calcContracts() {
     base = Math.min(CFG.maxContracts, cushionMax);
   }
 
-  // ── Layer 0a: Combine cushion guard — scale back to 4ct when near the floor ──
-  // Default is 5ct (MAX_CONTRACTS=5). If cushion drops below $2K, drop to 4ct
-  // to protect the trailing DD floor — daily halt at $700 still limits single-day risk.
-  // cushion = balance − (peakBalance − trailDD)
+  // ── Layer 0a: Combine cushion scaling ────────────────────────────────────
+  // Active when funded scaling (Layer 0) is off. Scales 1ct per $400 above the
+  // trailing DD floor ($97K at start). Each $400 of cushion covers a full bad day
+  // (5 stops × $40/ct) at that contract size — self-regulating: bad day shrinks
+  // cushion, next session trades fewer contracts automatically.
+  // floor = peakBalance − trailDD (trails up with wins, never below $97K)
+  // $0–$399=1ct | $400=2ct | $800=3ct | $1200=4ct | $1600=5ct | $2000=6ct
+  // $2400=7ct | $2800=8ct | $3200=9ct | $3600+=10ct
   if (startBal == null && state.balance != null && state.peakBalance != null) {
-    const floor   = state.peakBalance - CFG.trailDD;
-    const cushion = state.balance - floor;
-    if (cushion < 2000) base = Math.min(base, 4);
+    const floor    = state.peakBalance - CFG.trailDD;
+    const cushion  = state.balance - floor;
+    const combineMax = cushion >= 3600 ? 10 :
+                       cushion >= 3200 ? 9  :
+                       cushion >= 2800 ? 8  :
+                       cushion >= 2400 ? 7  :
+                       cushion >= 2000 ? 6  :
+                       cushion >= 1600 ? 5  :
+                       cushion >= 1200 ? 4  :
+                       cushion >= 800  ? 3  :
+                       cushion >= 400  ? 2  : 1;
+    base = Math.min(CFG.maxContracts, combineMax);
   }
 
   // ── Layer 0b: ATR volatility boost ───────────────────────────────────────
@@ -1621,11 +1634,20 @@ function calcContractsVerbose() {
     base = Math.min(CFG.maxContracts, cushionMax);
   }
 
-  // Layer 0a: Combine cushion guard (mirrors calcContracts)
+  // Layer 0a: Combine cushion scaling (mirrors calcContracts)
   if (startBal == null && state.balance != null && state.peakBalance != null) {
-    const floor   = state.peakBalance - CFG.trailDD;
-    const cushion = state.balance - floor;
-    if (cushion < 2000) base = Math.min(base, 4);
+    const floor    = state.peakBalance - CFG.trailDD;
+    const cushion  = state.balance - floor;
+    const combineMax = cushion >= 3600 ? 10 :
+                       cushion >= 3200 ? 9  :
+                       cushion >= 2800 ? 8  :
+                       cushion >= 2400 ? 7  :
+                       cushion >= 2000 ? 6  :
+                       cushion >= 1600 ? 5  :
+                       cushion >= 1200 ? 4  :
+                       cushion >= 800  ? 3  :
+                       cushion >= 400  ? 2  : 1;
+    base = Math.min(CFG.maxContracts, combineMax);
   }
 
   const curATRv = currentATR();
