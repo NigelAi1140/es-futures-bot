@@ -59,6 +59,22 @@ const RESTART_DELAY  = 10_000;
 const MAX_RESTARTS   = 20;
 let activeConfig     = null;
 
+// Current live NQ strategy set (matches nq-strategies.js V5.5 / the real
+// ENABLED_STRATEGIES used on our own accounts). Both the setup wizard's
+// strategy checkboxes (STRAT_LIST in setup.html) and config.default.json's
+// "strategies" key only ever listed the old ES strategy set — so selecting
+// NQ as the market never produced a working strategy list, and every NQ
+// account got "disabled by user config" for literally every NQ_ strategy
+// with no way to fix it from the app (2026-10-03). This fallback: if the
+// account is trading NQ and the configured strategy set doesn't contain any
+// actual NQ strategy name, use this default instead of sending the engine a
+// list that matches nothing. Fixes every existing broken install too, not
+// just new ones, without requiring the user to redo setup.
+const NQ_DEFAULT_STRATEGIES = [
+  "NQ_AM_VWAP_FADE_S", "NQ_ADR_FADE_S", "NQ_14H_REV_S",
+  "NQ_FIRST30_FADE_S", "NQ_OVERNIGHT_TRAP_S", "NQ_PM_VWAP_FADE_S",
+];
+
 // ── Create main dashboard window ──────────────────────────────────────────────
 let _bootScheduled = false; // guard against duplicate regime/update intervals
 
@@ -284,8 +300,11 @@ function startAccount(account, config) {
   const t = config.trading;
   const f = config.trendFilter;
   const stratSource = account.strategies ?? config.strategies;
-  const enabledStrats = Object.entries(stratSource)
+  let enabledStrats = Object.entries(stratSource)
     .filter(([, v]) => v).map(([k]) => k).join(",");
+  if (!NQ_DEFAULT_STRATEGIES.some(id => enabledStrats.includes(id))) {
+    enabledStrats = NQ_DEFAULT_STRATEGIES.join(",");
+  }
 
   const env = {
     ...process.env,

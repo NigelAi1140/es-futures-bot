@@ -3,37 +3,44 @@
     "email": ""
   },
 
-  "market": "es",
+  "market": "nq",
 
   "broker": {
     "type": "topstepx",
     "username": "",
-    "symbol": "ES",
+    "symbol": "NQ",
     "apiKey": "",
     "accounts": []
   },
 
   "trading": {
-    "contracts":          1,
-    "stopMode":           null,
+    "contracts":          15,
+    "autoScaling":     true,
+    "stopMode":          "fixed",
+    "forceFixedStopTicks": 12,
     "stopLossTicks":     10,
-    "maxStopTicks":      20,
+    "maxStopTicks":      60,
     "takeProfitTicks":   48,
     "trailTicks":         8,
     "dailyLossLimit":   1400,
     "dailyProfitCap":   2000,
     "atrMinFilter":      2.0,
-    "fundedStartBalance": 0
+    "fundedStartBalance": 0,
+
+    "fundedScaleBase":      3,
+    "fundedScaleTiers":     "1500:4,2000:5,3000:10",
+    "fundedScaleBaseStep":  1000,
+    "fundedScalePostStep":  2000,
+    "scaleEdgeDayCap":      false
   },
 
   "strategies": {
-    "DONCH15_L":    true,
-    "VOLBO_L":      true,
-    "VOLBO_S":      true,
-    "EMA21_PULL_L": true,
-    "BO10_S":       true,
-    "3BAR_BEAR_S":  true,
-    "KELT_L":       true
+    "NQ_AM_VWAP_FADE_S":   true,
+    "NQ_ADR_FADE_S":       true,
+    "NQ_14H_REV_S":        true,
+    "NQ_FIRST30_FADE_S":   true,
+    "NQ_OVERNIGHT_TRAP_S": true,
+    "NQ_PM_VWAP_FADE_S":   true
   },
 
   "regime": {
