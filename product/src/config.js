@@ -59,11 +59,6 @@ export function loadConfig(configPath = DEFAULT_CONFIG_PATH) {
 
 // ── Migration ─────────────────────────────────────────────────────────────────
 // V2 strategies removed in v1.1.41 (V3 quant rebuild — replaced by 7 new signals).
-// ES support removed entirely 2026-10-03 — TopstepX side is NQ-only now, so the
-// old V3 ES strategy ids are stale too. Also purges two wrong/stale NQ ids that
-// were in the old NQ default list (NQ_14H_REV was missing its _S suffix;
-// NQ_ADR_EXHAUST_S never existed in the real strategy set) so an existing
-// config with those bogus keys gets cleaned up, not just topped up around them.
 // Strip from all config locations so upgraded configs don't try to enable dead code.
 const REMOVED_STRATEGIES = [
   // Original removals
@@ -73,38 +68,28 @@ const REMOVED_STRATEGIES = [
   "BB_SQ_L", "VWAP_RECLAIM_L", "EMAXPB_L", "EMAXPB_S", "EMA50_PB_L",
   "EMAFAN_S", "BB_FADE_L", "STOCH_L", "STOCH_S", "KELT_S",
   "ORB_L", "INSIDE_BAR_BO_L", "INSIDE_BAR_BO_S",
-  // ES support removed (v1.2.27)
-  "DONCH15_L", "VOLBO_L", "VOLBO_S", "EMA21_PULL_L", "BO10_S", "3BAR_BEAR_S", "KELT_L",
-  // Wrong/stale NQ ids from the old V5.3 default list (v1.2.27)
-  "NQ_14H_REV", "NQ_ADR_EXHAUST_S",
-  // Disabled at the strategy-code level since V5.6 (9% WR, killed at week 7) —
-  // never actually emits a signal regardless of being "enabled" here.
-  "NQ_OB_FADE_S",
 ];
 
-// ES support removed 2026-10-03 — no top-level default strategies anymore,
-// only the NQ set below.
-const DEFAULT_ON_STRATEGIES = {};
+// V3 strategies added in v1.1.41 — enable by default in any upgraded config.
+const DEFAULT_ON_STRATEGIES = {
+  DONCH15_L:    true,
+  VOLBO_L:      true,
+  VOLBO_S:      true,
+  EMA21_PULL_L: true,
+  BO10_S:       true,
+  "3BAR_BEAR_S": true,
+  KELT_L:       true,
+};
 
-// Current live NQ strategy set (matches nq-strategies.js / ENABLED_STRATEGIES
-// on the real accounts) — default on when NQ market is active. Corrected
-// 2026-10-03: the previous list was V5.3-era, had a wrong id, a nonexistent
-// id, and was missing half the currently active strategies.
+// NQ V5.3 strategies — default on when NQ market is active.
 const NQ_DEFAULT_ON_STRATEGIES = {
-  NQ_AM_VWAP_FADE_S:    true,
-  NQ_ADR_FADE_S:        true,
-  NQ_14H_REV_S:         true,
-  NQ_FIRST30_FADE_S:    true,
-  NQ_OVERNIGHT_TRAP_S:  true,
-  NQ_TIGHT_VWAP_AM_L:   true,
-  NQ_TIGHT_VWAP_AM_S:   true,
-  NQ_HILOW_REJ_AM_L:    true,
-  NQ_HILOW_REJ_AM_S:    true,
-  NQ_MOM_EXHAUST_AM_L:  true,
-  NQ_MOM_EXHAUST_AM_S:  true,
-  NQ_PULLBACK_AM_L:     true,
-  NQ_PULLBACK_AM_S:     true,
-  NQ_PM_VWAP_FADE_S:    true,
+  NQ_OB_FADE_S:      true,
+  NQ_AM_VWAP_FADE_S: true,
+  NQ_ADR_FADE_S:     true,
+  NQ_14H_REV:        true,
+  NQ_FIRST30_FADE_S: true,
+  NQ_PM_VWAP_FADE_S: true,
+  NQ_ADR_EXHAUST_S:  true,
 };
 
 /**
@@ -114,69 +99,23 @@ const NQ_DEFAULT_ON_STRATEGIES = {
 function migrateConfig(cfg) {
   let changed = false;
 
-  // market field — NQ only since ES support was removed (v1.2.27). Force to
-  // "nq" regardless of any stale saved value, not just when missing.
-  if (cfg.market !== "nq") {
-    cfg.market = "nq";
+  // v1.1.55: market field — default to "es" if not present.
+  if (!cfg.market) {
+    cfg.market = "es";
     changed = true;
   }
 
-  // NQ strategies — add defaults if not present. No longer gated on market
-  // being "nq" since that's forced above; always applies now.
-  if (cfg.strategies && typeof cfg.strategies === "object") {
+  // v1.1.55: NQ strategies — add defaults if not present when market is nq.
+  if (cfg.market === "nq" && cfg.strategies && typeof cfg.strategies === "object") {
     for (const [id, val] of Object.entries(NQ_DEFAULT_ON_STRATEGIES)) {
       if (!(id in cfg.strategies)) { cfg.strategies[id] = val; changed = true; }
     }
   }
 
-  // v1.2.14: autoScaling toggle — cushion-based sizing vs. fixed contracts.
-  // Default true so upgraded configs keep today's behavior unless the user opts out.
-  if (cfg.trading && cfg.trading.autoScaling === undefined) {
-    cfg.trading.autoScaling = true;
-    changed = true;
-  }
-
-  // v1.2.31: match our own account's locked stop model (2026-09-28) — a hard
-  // fixed-tick stop that never moves, not a native trailing stop. Supersedes the
-  // old v1.1.19 migration below (which forced stopMode to null "to let each
-  // strategy decide") — that null then fell through main.js's own
-  // `t.stopMode ?? "trail"` default on every single spawn regardless, so every
-  // existing install — including a family member's real funded account — has
-  // actually been running STOP_MODE=trail (8t) this whole time, never the fixed
-  // model either of us intended. Force both fields unconditionally; this isn't a
-  // user preference to preserve, it's correcting an unintended default.
-  if (cfg.trading && (cfg.trading.stopMode !== "fixed" || cfg.trading.forceFixedStopTicks == null)) {
-    cfg.trading.stopMode = "fixed";
-    cfg.trading.forceFixedStopTicks = 11;
-    changed = true;
-  }
-  // v1.2.35: 11→12, matching our own account's current (still provisional,
-  // weekly-reviewed) value — user explicitly wants the product on the same
-  // live number we're running, not just the model. This is a one-time catch-up
-  // bump for installs already migrated to 11 above; expect this specific value
-  // to keep moving as it's reviewed most Fridays — don't treat 12 as settled.
-  if (cfg.trading && cfg.trading.forceFixedStopTicks === 11) {
-    cfg.trading.forceFixedStopTicks = 12;
-    changed = true;
-  }
-  // Capped at 60, not 150 — validateConfig() enforces maxStopTicks <= 60 and
-  // throws otherwise, which is exactly what just broke every v1.2.31 install on
-  // first load after update (confirmed 2026-10-09 against a real "Config load
-  // failed" screen). 60 is still far more headroom than the fixed 11t stop ever needs.
-  if (cfg.trading && cfg.trading.maxStopTicks === 20) {
-    cfg.trading.maxStopTicks = 60;
-    changed = true;
-  }
-
-  // v1.2.33: "Max Contracts" now acts as a real ceiling on every auto-scaling
-  // path (previously only some of them — see ACCOUNT_BASE/maxContracts notes in
-  // main.js and topstepx-engine.js). The old factory default of 1 would now
-  // silently cap every existing install's auto-scaling at 1ct forever instead of
-  // leaving it unused like before. Bump stale defaults up to the real per-size
-  // ceiling (trueAccountMaxContracts() clamps it down further anyway, so this is
-  // "don't additionally restrict," not "trade bigger than TopstepX allows").
-  if (cfg.trading && cfg.trading.contracts === 1) {
-    cfg.trading.contracts = 15;
+  // v1.1.19: stopMode "trail" was overriding all strategy-level fixed stops.
+  // Correct value is null (let each strategy decide).
+  if (cfg.trading?.stopMode === "trail") {
+    cfg.trading.stopMode = null;
     changed = true;
   }
 
@@ -213,26 +152,6 @@ function migrateConfig(cfg) {
       for (const id of REMOVED_STRATEGIES) {
         if (id in acc.strategies) { delete acc.strategies[id]; changed = true; }
       }
-    }
-  }
-
-  // v1.2.33: backfill account.size for accounts added before this field existed
-  // (every existing install) — see ACCOUNT_BASE note in main.js's env builder.
-  // Best-effort from the account name; stays null (shown as "size?" in Settings,
-  // defaulting the engine to its 100K fallback) when nothing recognizable is found,
-  // same as a brand-new account the auto-detect in Settings couldn't place either.
-  if (Array.isArray(cfg.broker?.accounts)) {
-    for (const acc of cfg.broker.accounts) {
-      if (acc.size !== undefined) continue;
-      const m = /(\d{2,3})\s*K/i.exec(acc.name || "");
-      if (m) {
-        const n = parseInt(m[1], 10) * 1000;
-        const sizes = [50000, 100000, 150000];
-        acc.size = sizes.reduce((best, s) => Math.abs(s - n) < Math.abs(best - n) ? s : best, sizes[0]);
-      } else {
-        acc.size = null;
-      }
-      changed = true;
     }
   }
 

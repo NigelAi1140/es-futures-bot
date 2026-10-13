@@ -11,7 +11,7 @@
 
 import { app, BrowserWindow, ipcMain, shell } from "electron";
 import { spawn }            from "child_process";
-import { existsSync, readFileSync, writeFileSync, unlinkSync, appendFileSync, mkdirSync, readdirSync, statSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { resolve, dirname, join } from "path";
 import { fileURLToPath }    from "url";
 
@@ -48,39 +48,6 @@ const IS_PKG    = app.isPackaged;
 const CONFIG_PATH = IS_PKG
   ? join(app.getPath("userData"), "config.json")
   : resolve(ROOT, "config.json");
-
-// Engine state (trade history, peak balance, session gates) must live in the
-// user-writable app data directory, NOT process.resourcesPath — the resources
-// folder is inside the app bundle and gets replaced wholesale on every
-// auto-update, silently wiping trade history and resetting cushion sizing/
-// risk gates. In dev, keep using the repo's own logs/ folder.
-const LOGS_DIR = IS_PKG
-  ? join(app.getPath("userData"), "logs")
-  : resolve(ROOT, "../logs");
-
-// Pending "what's new" notes, written when an auto-update finishes downloading
-// (before quitAndInstall relaunches the app) and read back once on the next
-// boot to show a changelog popup. Lives next to config.json so it survives
-// the relaunch the same way config.json does.
-const PENDING_UPDATE_NOTES_PATH = IS_PKG
-  ? join(app.getPath("userData"), "pending-update-notes.json")
-  : resolve(ROOT, "pending-update-notes.json");
-
-// ── Persistent raw log files (one per calendar day, all accounts combined) ────
-// Engine stdout/stderr was previously only ever streamed live to the renderer
-// (mainWin.webContents.send("engine-log", ...)) with no file ever written —
-// so there was nothing to export for support requests beyond screenshots of
-// whatever happened to still be on screen. Written to LOGS_DIR, same place
-// trades.jsonl already lives, so both get swept up by date-range export.
-if (!existsSync(LOGS_DIR)) mkdirSync(LOGS_DIR, { recursive: true });
-function logToFile(accountName, line, isErr = false) {
-  try {
-    const day = new Date().toISOString().slice(0, 10);
-    const path = join(LOGS_DIR, `engine-${day}.log`);
-    const ts = new Date().toISOString();
-    appendFileSync(path, `[${ts}] [${accountName}]${isErr ? " [ERR]" : ""} ${line}\n`);
-  } catch { /* non-fatal — never let logging itself break the engine */ }
-}
 
 // ── Window references ─────────────────────────────────────────────────────────
 let mainWin   = null;
@@ -144,7 +111,7 @@ function createMainWindow() {
     try {
       ({ config } = loadConfig(CONFIG_PATH));
     } catch (err) {
-      mainWin?.webContents.send("license-invalid", `Config load failed: ${err.message}`);
+      mainWin?.webContents.send("license-invalid", "Config load failed — please reinstall.");
       return;
     }
 
@@ -160,10 +127,6 @@ function createMainWindow() {
       isTrial:      license.isTrial     ?? false,
       isFreeLoader: license.isFreeLoader ?? false,
     });
-
-    const pendingNotes = readPendingUpdateNotes();
-    if (pendingNotes) mainWin?.webContents.send("update-notes", pendingNotes);
-
     mainWin?.webContents.send("config-loaded", {
       accounts:    config.broker.type === "alpaca"
         ? ["Alpaca-Paper"]
@@ -269,7 +232,7 @@ function launchEngines(config) {
     startAlpacaEngine(config);
   } else {
     config.broker.accounts.filter(a => a.id).forEach((acc, i) => {
-      setTimeout(() => startAccount(acc, config, i), i * 2000);
+      setTimeout(() => startAccount(acc, config), i * 2000);
     });
   }
 }
@@ -284,7 +247,6 @@ function startAlpacaEngine(config) {
 
   const env = {
     ...process.env,
-    LOGS_DIR:           LOGS_DIR,
     ALPACA_KEY:         config.broker.alpacaKey   ?? "",
     ALPACA_SECRET:      config.broker.alpacaSecret ?? "",
     ALPACA_PAPER:       "true",
@@ -312,17 +274,15 @@ function startAlpacaEngine(config) {
 
   const emit = (line) => {
     mainWin?.webContents.send("engine-log", { account: name, line });
-    logToFile(name, line);
     const pnlMatch = line.match(/P&L.*?(-?\$[\d,.]+)/);
-    const balMatch = line.match(/(?:\[Balance\] current=|balance=)\$([0-9,.]+)/);
+    const balMatch = line.match(/balance=\$([0-9,.]+)/);
     if (pnlMatch) mainWin?.webContents.send("pnl-update",     { account: name, pnl:     pnlMatch[1] });
     if (balMatch) mainWin?.webContents.send("balance-update",  { account: name, balance: balMatch[1] });
   };
   proc.stdout.on("data", buf => buf.toString().split("\n").filter(Boolean).forEach(emit));
-  proc.stderr.on("data", buf => buf.toString().split("\n").filter(Boolean).forEach(l => {
-    mainWin?.webContents.send("engine-log", { account: name, line: l, isErr: true });
-    logToFile(name, l, true);
-  }));
+  proc.stderr.on("data", buf => buf.toString().split("\n").filter(Boolean).forEach(l =>
+    mainWin?.webContents.send("engine-log", { account: name, line: l, isErr: true })
+  ));
   proc.on("close", (code, signal) => {
     mainWin?.webContents.send("engine-exit", { account: name, code, signal });
     if (entry.paused || code === 0) return;
@@ -332,23 +292,15 @@ function startAlpacaEngine(config) {
   });
 }
 
-function startAccount(account, config, idx) {
+function startAccount(account, config) {
   const entry = procs.get(account.name) ?? { restarts: 0, paused: false };
   if (entry.paused)              return;
   if (entry.restarts >= MAX_RESTARTS) return;
 
-  // Index isn't passed on restart — recompute it from the account's position
-  // in the configured list so the stagger index stays stable across restarts.
-  const accountIdx = idx ?? Math.max(0, config.broker.accounts.findIndex(a => a.id === account.id));
-
   const t = config.trading;
   const f = config.trendFilter;
-  // TopstepX side only trades NQ — ES support removed 2026-10-03. This stays
-  // unconditional (not read from config.market) so a stale saved config from
-  // before this change can't silently put an account back on the old,
-  // never-correctly-populated ES strategy path.
   const stratSource = account.strategies ?? config.strategies;
-  let enabledStrats = Object.entries(stratSource ?? {})
+  let enabledStrats = Object.entries(stratSource)
     .filter(([, v]) => v).map(([k]) => k).join(",");
   if (!NQ_DEFAULT_STRATEGIES.some(id => enabledStrats.includes(id))) {
     enabledStrats = NQ_DEFAULT_STRATEGIES.join(",");
@@ -356,29 +308,13 @@ function startAccount(account, config, idx) {
 
   const env = {
     ...process.env,
-    LOGS_DIR:           LOGS_DIR,
     TV_USER:            config.broker.username,
     TV_API_KEY:         config.broker.apiKey,
     ACCOUNT_ID:         account.id ?? "",
-    // Drives trueAccountMaxContracts()'s real TopstepX per-size ceiling (5/10/15ct
-    // for 50K/100K/150K). Found 2026-10-10: never set anywhere before this, so every
-    // account silently used the engine's internal 100K fallback regardless of real
-    // size — a 50K account could size up to the 10ct ceiling meant for 100K accounts
-    // once its cushion unlocked. account.size comes from the account-size dropdown
-    // in Settings (auto-detected from the account name, user-confirmable/editable).
-    ACCOUNT_BASE:       String(account.size ?? 100000),
-    SYMBOL:             "NQ",
-    MARKET:             "nq",
+    SYMBOL:             config.market === "nq" ? "NQ" : (config.broker.symbol ?? "ES"),
+    MARKET:             config.market ?? "es",
     MAX_CONTRACTS:      String(t.contracts),
-    AUTO_SCALING:       t.autoScaling === false ? "0" : "1",
-    // Matches our own account's locked stop model (2026-09-28, still in force) —
-    // a hard fixed-tick stop that never moves, not a native trailing stop. Found
-    // 2026-10-09: every install defaulted to STOP_MODE="trail" (trailTicks:8) with
-    // FORCE_FIXED_STOP_TICKS never set at all, so every customer — including a
-    // family member's real funded account — has been running a different, never-
-    // deliberately-chosen stop model from what we actually use and have tuned.
-    STOP_MODE:          t.stopMode ?? "fixed",
-    FORCE_FIXED_STOP_TICKS: String(t.forceFixedStopTicks ?? 11),
+    STOP_MODE:          t.stopMode ?? "trail",
     STOP_LOSS_TICKS:    String(t.stopLossTicks),
     MAX_STOP_TICKS:     String(t.maxStopTicks),
     TAKE_PROFIT_TICKS:  String(t.takeProfitTicks),
@@ -391,31 +327,9 @@ function startAccount(account, config, idx) {
     TREND_DN_PTS:       String(f.downtrendThreshold),
     REGIME_FILTER:        t.regimeFilter ?? "auto",
     FUNDED_START_BALANCE: String(t.fundedStartBalance ?? 0),
-    // TopstepX's real Express Funded contract-size table (confirmed from account
-    // Risk Settings), with smoothing ramps on both ends — same system used on our
-    // own accounts. Takes priority over the generic cushion-based scaling above
-    // when set, and critically sizes off the SESSION-OPEN balance snapshot, not
-    // the live-ticking balance, so contract count holds steady for the whole day
-    // instead of drifting as balance moves intraday (2026-10-05 — ported in after
-    // finding the generic cushion path doesn't have this day-lock behavior).
-    FUNDED_SCALE_BASE:       String(t.fundedScaleBase ?? 3),
-    FUNDED_SCALE_TIERS:      t.fundedScaleTiers ?? "1500:4,2000:5,3000:10",
-    FUNDED_SCALE_BASE_STEP:  String(t.fundedScaleBaseStep ?? 1000),
-    FUNDED_SCALE_POST_STEP:  String(t.fundedScalePostStep ?? 2000),
-    // Monday/Friday pinned to 1ct regardless of cushion — opt-in only (off by
-    // default), matches engine's own "personal risk preference, not a default
-    // for every commercial customer's funded account" design intent.
-    SCALE_EDGE_DAY_CAP:   t.scaleEdgeDayCap === true ? "1" : "0",
     ENABLED_STRATEGIES:   enabledStrats,
     MULTI_ACCOUNT:      "1",
     ACCOUNT_LABEL:      account.name,
-    // Explicit sequential index for the entry-stagger calculation — never parsed
-    // from account.name, which is TopstepX's own auto-generated display name
-    // (e.g. "50KTC-V2-DLL-646004-94940643") and can end in a huge, unpredictable
-    // numeric ID. Parsing trailing digits out of that overflowed a 32-bit
-    // setTimeout, which Node silently clamps to 1ms — so the stagger protection
-    // was silently disabled for any account using TopstepX's default naming.
-    ACCOUNT_IDX:        String(accountIdx),
     ...(config.notifications?.enabled && config.notifications?.ntfyChannel ? { NTFY_CHANNEL: config.notifications.ntfyChannel } : {}),
   };
 
@@ -429,12 +343,11 @@ function startAccount(account, config, idx) {
   const emit = (line) => {
     if (!line.startsWith("[BUNDLE]")) {
       mainWin?.webContents.send("engine-log", { account: account.name, line });
-      logToFile(account.name, line);
 
       // Parse structured events for the dashboard
       const tradeMatch  = line.match(/\[(?:Order|Trade)\].*?(LONG|SHORT).*?(\d+)ct/);
       const pnlMatch    = line.match(/P&L.*?(-?\$[\d,.]+)/);
-      const balMatch    = line.match(/(?:\[Balance\] current=|balance=)\$([0-9,.]+)/);
+      const balMatch    = line.match(/balance=\$([0-9,.]+)/);
       const haltMatch   = line.match(/Daily loss limit.*hit|profit cap.*reached/);
       const trendMatch  = line.match(/\[Trend\].*(UPTREND|DOWNTREND|NEUTRAL)/);
 
@@ -449,7 +362,6 @@ function startAccount(account, config, idx) {
   proc.stdout.on("data", buf => buf.toString().split("\n").filter(Boolean).forEach(emit));
   proc.stderr.on("data", buf => buf.toString().split("\n").filter(Boolean).forEach(l => {
     mainWin?.webContents.send("engine-log", { account: account.name, line: l, isErr: true });
-    logToFile(account.name, l, true);
     if (l.includes("[FATAL]")) entry.lastFatal = l.replace("[FATAL]", "").trim();
   }));
 
@@ -510,34 +422,9 @@ autoUpdater.on("download-progress", (progress) => {
 
 autoUpdater.on("update-downloaded", (info) => {
   broadcast("update-ready", { version: info.version });
-  // Stash the release notes now, before the relaunch — read back once on next
-  // boot to show a "what's new" popup (see readPendingUpdateNotes() below).
-  try {
-    const notes = typeof info.releaseNotes === "string"
-      ? info.releaseNotes
-      : Array.isArray(info.releaseNotes)
-      ? info.releaseNotes.map(n => `## ${n.version}\n${n.note ?? ""}`).join("\n\n")
-      : "";
-    writeFileSync(PENDING_UPDATE_NOTES_PATH, JSON.stringify({ version: info.version, notes }));
-  } catch { /* non-fatal — update still installs without the popup */ }
   // Auto-install after 30s so the user sees the notification, then restarts automatically
   setTimeout(() => autoUpdater.quitAndInstall(true, true), 30_000);
 });
-
-// Read-and-clear so the popup shows exactly once, on the first boot after
-// the update that produced it (a crash/relaunch loop would otherwise re-show
-// stale notes on every subsequent start).
-function readPendingUpdateNotes() {
-  if (!existsSync(PENDING_UPDATE_NOTES_PATH)) return null;
-  try {
-    const data = JSON.parse(readFileSync(PENDING_UPDATE_NOTES_PATH, "utf8"));
-    unlinkSync(PENDING_UPDATE_NOTES_PATH);
-    return data;
-  } catch {
-    try { unlinkSync(PENDING_UPDATE_NOTES_PATH); } catch {}
-    return null;
-  }
-}
 
 ipcMain.on("install-update", () => {
   autoUpdater.quitAndInstall(true, true);
@@ -611,7 +498,8 @@ ipcMain.handle("get-config",  () => activeConfig);
 
 ipcMain.handle("export-trades", async () => {
   try {
-    const jsonlPath = join(LOGS_DIR, "trades.jsonl");
+    const logsDir  = IS_PKG ? join(process.resourcesPath, "logs") : resolve(ROOT, "../logs");
+    const jsonlPath = join(logsDir, "trades.jsonl");
     if (!existsSync(jsonlPath)) return { ok: false, error: "No trade history found yet." };
 
     const lines = readFileSync(jsonlPath, "utf8").trim().split("\n").filter(Boolean);
@@ -627,49 +515,6 @@ ipcMain.handle("export-trades", async () => {
 
     const csv = [headers.join(","), ...rows].join("\n");
     return { ok: true, csv, count: records.length };
-  } catch (e) {
-    return { ok: false, error: e.message };
-  }
-});
-
-// Date-range export of the raw engine log (the [Sig]/[Order]/error lines, not
-// just structured trades) — built so a user can send exactly the window a
-// support request needs instead of their whole log history. Reads whichever
-// daily engine-YYYY-MM-DD.log files fall inside [start, end] (inclusive,
-// YYYY-MM-DD strings) and concatenates them in order.
-ipcMain.handle("export-logs-range", async (_, { start, end }) => {
-  try {
-    if (!start || !end) return { ok: false, error: "Pick a start and end date." };
-    if (start > end) return { ok: false, error: "Start date must be before end date." };
-
-    const files = readdirSync(LOGS_DIR)
-      .filter(f => /^engine-\d{4}-\d{2}-\d{2}\.log$/.test(f))
-      .map(f => ({ f, day: f.slice(7, 17) }))
-      .filter(({ day }) => day >= start && day <= end)
-      .sort((a, b) => a.day.localeCompare(b.day));
-
-    if (!files.length) return { ok: false, error: `No logs found between ${start} and ${end}.` };
-
-    const text = files
-      .map(({ f, day }) => `===== ${day} =====\n` + readFileSync(join(LOGS_DIR, f), "utf8"))
-      .join("\n");
-
-    return { ok: true, text, days: files.length };
-  } catch (e) {
-    return { ok: false, error: e.message };
-  }
-});
-
-ipcMain.handle("clear-logs", async () => {
-  try {
-    const files = readdirSync(LOGS_DIR).filter(f => /^engine-\d{4}-\d{2}-\d{2}\.log$/.test(f));
-    let freedBytes = 0;
-    for (const f of files) {
-      const p = join(LOGS_DIR, f);
-      try { freedBytes += statSync(p).size; } catch {}
-      try { unlinkSync(p); } catch {}
-    }
-    return { ok: true, count: files.length, freedMB: (freedBytes / (1024 * 1024)).toFixed(1) };
   } catch (e) {
     return { ok: false, error: e.message };
   }

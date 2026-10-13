@@ -633,8 +633,8 @@
       </div>
       <div class="form-group">
         <label>SYMBOL</label>
-        <input type="text" id="broker-symbol" value="NQ" placeholder="NQ">
-        <div class="hint">Futures contract symbol. NQ (Nasdaq-100) only.</div>
+        <input type="text" id="broker-symbol" value="ES" placeholder="ES">
+        <div class="hint">Futures contract symbol. Default: ES (S&amp;P 500).</div>
       </div>
     </div>
 
@@ -997,7 +997,7 @@ document.getElementById("next-1").addEventListener("click", () => {
   }
 
   const user   = document.getElementById("broker-user").value.trim();
-  const symbol = document.getElementById("broker-symbol").value.trim() || "NQ";
+  const symbol = document.getElementById("broker-symbol").value.trim() || "ES";
   if (!user) { showError("broker-error", "Enter your TopstepX username."); return; }
 
   setupData.brokerType = "topstepx";
@@ -1009,20 +1009,13 @@ document.getElementById("next-1").addEventListener("click", () => {
 
 /* -- Accounts step -- */
 const STRAT_LIST = [
-  ["NQ_AM_VWAP_FADE_S",   "AM VWAP Fade Short"],
-  ["NQ_ADR_FADE_S",       "ADR Fade Short"],
-  ["NQ_14H_REV_S",        "14H Reversal Short"],
-  ["NQ_FIRST30_FADE_S",   "First30 Fade Short"],
-  ["NQ_OVERNIGHT_TRAP_S", "Overnight Trap Short"],
-  ["NQ_TIGHT_VWAP_AM_L",  "Tight VWAP Fade Long"],
-  ["NQ_TIGHT_VWAP_AM_S",  "Tight VWAP Fade Short"],
-  ["NQ_HILOW_REJ_AM_L",   "Hi/Low Rejection Long"],
-  ["NQ_HILOW_REJ_AM_S",   "Hi/Low Rejection Short"],
-  ["NQ_MOM_EXHAUST_AM_L", "Momentum Exhaust Long"],
-  ["NQ_MOM_EXHAUST_AM_S", "Momentum Exhaust Short"],
-  ["NQ_PULLBACK_AM_L",    "Pullback Long"],
-  ["NQ_PULLBACK_AM_S",    "Pullback Short"],
-  ["NQ_PM_VWAP_FADE_S",   "PM VWAP Fade Short"],
+  ["DONCH15_L",    "Donchian 15 Long"],
+  ["VOLBO_L",      "Volume BO Long"],
+  ["VOLBO_S",      "Volume BO Short"],
+  ["EMA21_PULL_L", "EMA21 Pullback Long"],
+  ["BO10_S",       "Donchian 10 Short"],
+  ["3BAR_BEAR_S",  "3-Bar Reversal Short"],
+  ["KELT_L",       "Keltner Bounce Long"],
 ];
 
 let _txAccounts = [];  // fetched from TopstepX API

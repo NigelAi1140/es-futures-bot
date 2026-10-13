@@ -77,43 +77,19 @@ const state = {
 };
 
 let _settingsAccounts = [];  // working copy of broker.accounts while settings panel is open
-let _currentMarket = "nq";  // NQ only — ES support removed 2026-10-03
+let _currentMarket = "es";  // "es" | "nq"
 
-// Matches the live NQ strategy set in nq-strategies.js / ENABLED_STRATEGIES —
-// corrected 2026-10-03, was stale (wrong ids, missing half the active list).
 const NQ_STRATS = {
-  NQ_AM_VWAP_FADE_S:   { label: "AM VWAP FADE S",    session: "AM",     tp: "72t" },
-  NQ_ADR_FADE_S:       { label: "ADR FADE S",         session: "AM",     tp: "80t" },
-  NQ_14H_REV_S:        { label: "14H REVERSAL S",     session: "AM 14+", tp: "80t" },
-  NQ_FIRST30_FADE_S:   { label: "FIRST30 FADE S",     session: "AM 14+", tp: "76t" },
-  NQ_OVERNIGHT_TRAP_S: { label: "OVERNIGHT TRAP S",   session: "AM",     tp: "80t" },
-  NQ_TIGHT_VWAP_AM_L:  { label: "TIGHT VWAP L",       session: "AM+PM",  tp: "56t" },
-  NQ_TIGHT_VWAP_AM_S:  { label: "TIGHT VWAP S",       session: "AM+PM",  tp: "56t" },
-  NQ_HILOW_REJ_AM_L:   { label: "HI/LOW REJECT L",    session: "AM",     tp: "84t" },
-  NQ_HILOW_REJ_AM_S:   { label: "HI/LOW REJECT S",    session: "AM",     tp: "84t" },
-  NQ_MOM_EXHAUST_AM_L: { label: "MOM EXHAUST L",      session: "AM",     tp: "76t" },
-  NQ_MOM_EXHAUST_AM_S: { label: "MOM EXHAUST S",      session: "AM",     tp: "76t" },
-  NQ_PULLBACK_AM_L:    { label: "PULLBACK L",         session: "AM",     tp: "20t" },
-  NQ_PULLBACK_AM_S:    { label: "PULLBACK S",         session: "AM",     tp: "20t" },
-  NQ_PM_VWAP_FADE_S:   { label: "PM VWAP FADE S",     session: "PM",     tp: "48t" },
+  NQ_OB_FADE_S:      { label: "OB FADE S",       session: "AM 13:30", tp: "40t", wr: 100, n: 5  },
+  NQ_AM_VWAP_FADE_S: { label: "AM VWAP FADE S",  session: "AM",       tp: "24t", wr: 100, n: 8  },
+  NQ_ADR_FADE_S:     { label: "ADR FADE S",       session: "AM",       tp: "32t", wr: 100, n: 4  },
+  NQ_14H_REV:        { label: "14H REVERSAL",     session: "AM 14+",   tp: "32t", wr: 100, n: 6  },
+  NQ_FIRST30_FADE_S: { label: "FIRST30 FADE S",   session: "AM 14+",   tp: "32t", wr: 100, n: 3  },
+  NQ_PM_VWAP_FADE_S: { label: "PM VWAP FADE S",   session: "PM",       tp: "28t", wr: 100, n: 12 },
+  NQ_ADR_EXHAUST_S:  { label: "ADR EXHAUST S",    session: "AM 14+",   tp: "24t", wr: 100, n: 2  },
 };
 
 const COMBINE_MAX_CT = { 50000: 5, 100000: 10, 150000: 15 };
-
-// Best-effort guess at real account size from TopstepX's own account name
-// (e.g. "50KTC-V2-DLL-...", "100K-Funded-NQ2") — TopstepX size-prefixes most
-// account names, but not all (Express accounts can be named "EXPRESS-V2-..."
-// with no size at all), so this is a starting point for the editable dropdown,
-// never the sole source of truth. Returns null when nothing recognizable is found.
-function detectAccountSize(name) {
-  const m = /(\d{2,3})\s*K/i.exec(name || "");
-  if (!m) return null;
-  const n = parseInt(m[1], 10) * 1000;
-  // Snap to the nearest real TopstepX size rather than trusting the parsed
-  // number outright — guards against a coincidental digit match.
-  const sizes = Object.keys(COMBINE_MAX_CT).map(Number);
-  return sizes.reduce((best, s) => Math.abs(s - n) < Math.abs(best - n) ? s : best, sizes[0]);
-}
 
 const SIZE_RECS = {
   50000:  { contracts: 2, lossLimit: 750,  profitCap: 1500 },
@@ -334,7 +310,6 @@ function _detectAccountSize() {
 }
 
 function _applyAcctSizeRecs(size) {
-  _applyContractsHardCap(size);
   const banner    = document.getElementById("acct-size-banner");
   const manualRow = document.getElementById("acct-size-manual-row");
   const rec = SIZE_RECS[size];
@@ -355,55 +330,38 @@ function _applyAcctSizeRecs(size) {
   }
 }
 
-function _renderStrategyDisplay() {
+function _renderStrategyDisplay(market) {
   const container = document.getElementById("settings-strats-display");
   if (!container) return;
   container.innerHTML = "";
-  for (const [, info] of Object.entries(NQ_STRATS)) {
-    const row = document.createElement("div");
-    row.className = "strat-display-row";
-    row.innerHTML = `<span class="strat-disp-label">${info.label}</span><span class="strat-disp-sess">${info.session}</span><span class="strat-disp-tp">${info.tp}</span>`;
-    container.appendChild(row);
-  }
-}
-
-function _updateAutoScalingUI(enabled) {
-  const label = document.getElementById("contracts-label");
-  const hint  = document.getElementById("auto-scaling-hint");
-  if (label) label.textContent = enabled ? "Max Contracts" : "Fixed Contracts";
-  if (hint)  hint.textContent  = enabled
-    ? "cushion grows size automatically, never above this number"
-    : "trades this size every time (up to your account limit)";
-}
-
-function onAutoScalingChange(checked) {
-  _updateAutoScalingUI(checked);
-}
-window.onAutoScalingChange = onAutoScalingChange;
-
-// Hard-caps the contracts field to the real TopstepX limit for the detected/selected
-// account size, so a fixed-size (auto-scaling off) config can never place an order
-// TopstepX will just reject — bad UX and confusing for less technical users.
-let _currentContractsCap = 15;
-function _applyContractsHardCap(size) {
-  _currentContractsCap = (size && COMBINE_MAX_CT[size]) ? COMBINE_MAX_CT[size] : 15;
-  const input = document.getElementById("cfg-contracts");
-  const hint  = document.getElementById("rec-contracts");
-  if (input) {
-    input.max = String(_currentContractsCap);
-    if (numVal("cfg-contracts") > _currentContractsCap) {
-      setValue("cfg-contracts", _currentContractsCap);
+  if (market === "nq") {
+    for (const [, info] of Object.entries(NQ_STRATS)) {
+      const row = document.createElement("div");
+      row.className = "strat-display-row";
+      row.innerHTML = `<span class="strat-disp-label">${info.label}</span><span class="strat-disp-sess">${info.session}</span><span class="strat-disp-tp">${info.tp}</span>`;
+      container.appendChild(row);
     }
+  } else {
+    const note = document.createElement("div");
+    note.className = "strat-display-row";
+    note.style.opacity = "0.5";
+    note.textContent = "ES multi-strategy suite — managed by engine";
+    container.appendChild(note);
   }
-  const capLabel = document.getElementById("contracts-cap-label");
-  if (capLabel) capLabel.textContent = size ? `max ${_currentContractsCap}ct for this account size` : "";
 }
 
-function onContractsInput() {
-  const v = numVal("cfg-contracts");
-  if (v > _currentContractsCap) setValue("cfg-contracts", _currentContractsCap);
+function onMarketCheck(mkt, checked) {
+  if (checked) {
+    const other = mkt === "es" ? "nq" : "es";
+    const otherEl = document.getElementById(`cfg-mkt-${other}`);
+    if (otherEl) otherEl.checked = false;
+    _currentMarket = mkt;
+    _renderStrategyDisplay(mkt);
+  } else {
+    document.getElementById(`cfg-mkt-${mkt}`).checked = true;
+  }
 }
-window.onContractsInput = onContractsInput;
+window.onMarketCheck = onMarketCheck;
 
 function onAcctSizeChange(val) {
   const size = val ? Number(val) : null;
@@ -420,18 +378,21 @@ window.onAcctSizeChange = onAcctSizeChange;
 function openSettings() {
   const overlay = document.getElementById("overlay-settings");
   const cfg = state.fullConfig;
-  _currentMarket = "nq";
+  _currentMarket = cfg?.market ?? "nq";
 
-  _renderStrategyDisplay();
+  // Market checkboxes (mutually exclusive)
+  const esEl = document.getElementById("cfg-mkt-es");
+  const nqEl = document.getElementById("cfg-mkt-nq");
+  if (esEl) esEl.checked = _currentMarket === "es";
+  if (nqEl) nqEl.checked = _currentMarket === "nq";
+
+  _renderStrategyDisplay(_currentMarket);
 
   if (cfg) {
     const t = cfg.trading ?? {};
     setValue("cfg-daily-loss", t.dailyLossLimit);
     setValue("cfg-profit-cap", t.dailyProfitCap);
     setValue("cfg-contracts",  t.contracts);
-    const autoScalingEl = document.getElementById("cfg-auto-scaling");
-    if (autoScalingEl) autoScalingEl.checked = t.autoScaling !== false;
-    _updateAutoScalingUI(t.autoScaling !== false);
   }
 
   const detectedSize = _detectAccountSize();
@@ -460,11 +421,6 @@ function closeSettings() {
 }
 window.closeSettings = closeSettings;
 
-function closeWhatsNew() {
-  document.getElementById("overlay-whats-new").setAttribute("hidden", "");
-}
-window.closeWhatsNew = closeWhatsNew;
-
 async function exportTradeHistory() {
   const msg = document.getElementById("settings-msg");
   msg.textContent = "Exporting…";
@@ -487,50 +443,7 @@ async function exportTradeHistory() {
     msg.textContent = `⚠ Export failed: ${e.message}`;
   }
 }
-
-async function exportLogsRange() {
-  const msg   = document.getElementById("log-export-msg");
-  const start = document.getElementById("log-export-start").value;
-  const end   = document.getElementById("log-export-end").value;
-  if (!start || !end) { msg.textContent = "Pick both dates first."; return; }
-
-  msg.textContent = "Exporting…";
-  try {
-    const result = await window.bot.exportLogsRange({ start, end });
-    if (!result.ok) { msg.textContent = `⚠ ${result.error}`; return; }
-
-    const blob = new Blob([result.text], { type: "text/plain" });
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement("a");
-    a.href     = url;
-    a.download = `oracle-logs-${start}_to_${end}.txt`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    msg.textContent = `✓ Exported ${result.days} day(s) of logs`;
-    setTimeout(() => { msg.textContent = ""; }, 4000);
-  } catch (e) {
-    msg.textContent = `⚠ Export failed: ${e.message}`;
-  }
-}
-window.exportLogsRange = exportLogsRange;
 window.exportTradeHistory = exportTradeHistory;
-
-async function clearLogs() {
-  const msg = document.getElementById("log-clear-msg");
-  if (!confirm("Delete all saved daily logs from this computer? This can't be undone — export anything you need first.")) return;
-  msg.textContent = "Clearing…";
-  try {
-    const result = await window.bot.clearLogs();
-    if (!result.ok) { msg.textContent = `⚠ ${result.error}`; return; }
-    msg.textContent = `✓ Cleared ${result.count} log file(s), freed ${result.freedMB}MB`;
-    setTimeout(() => { msg.textContent = ""; }, 5000);
-  } catch (e) {
-    msg.textContent = `⚠ Clear failed: ${e.message}`;
-  }
-}
-window.clearLogs = clearLogs;
 
 function renderAccountsList(accounts) {
   _settingsAccounts = accounts.map(a => ({ ...a }));
@@ -542,20 +455,10 @@ function renderAccountsList(accounts) {
     row.className = "acct-settings-row";
     const acctState = state.accounts[acct.name];
     const connected = acctState && acctState.status !== 'starting' ? "✓" : "";
-    const sizeOptions = [50000, 100000, 150000]
-      .map(s => `<option value="${s}" ${acct.size === s ? "selected" : ""}>${s / 1000}K</option>`)
-      .join("");
-    const sizeUnknown = acct.size == null;
     row.innerHTML = `
       <span class="acct-row-name" title="${acct.name}">${acct.name}</span>
       <span class="acct-row-type" style="color:var(--green-lo)">${connected}</span>
       <span class="acct-row-type">${acct.type ?? ""}</span>
-      <select class="field-v field-v-sm" style="width:auto;padding:1px 4px;font-size:9px${sizeUnknown ? ";border-color:var(--red,#e06060)" : ""}"
-        title="${sizeUnknown ? "Couldn't detect from account name — please confirm" : "Account size — sets TopstepX's real contract limit (5/10/15ct)"}"
-        onchange="updateAccountSize(${i}, this.value)">
-        <option value="" ${sizeUnknown ? "selected" : ""} disabled>size?</option>
-        ${sizeOptions}
-      </select>
       <button class="acct-row-remove" onclick="removeSettingsAccount(${i})">×</button>`;
     list.appendChild(row);
   });
@@ -565,16 +468,25 @@ function renderAccountsList(accounts) {
   if (addBtn) addBtn.style.display = "";
 }
 
-// Sets the real account size the engine uses to enforce TopstepX's actual
-// per-size contract ceiling (5/10/15ct) — see ACCOUNT_BASE in main.js's env
-// builder. Found 2026-10-10: this was never captured anywhere in the product,
-// so every account silently defaulted to the engine's internal 100K fallback
-// regardless of real size — a 50K account could size up to the 10ct ceiling
-// meant for 100K accounts once its cushion unlocked.
-function updateAccountSize(i, val) {
-  _settingsAccounts[i].size = val ? Number(val) : null;
+function updateAccountCombineSize(i, val) {
+  _settingsAccounts[i].combineSize = val ? Number(val) : null;
+  if (_settingsAccounts[i].autoScale && val) {
+    const maxCt = COMBINE_MAX_CT[Number(val)] ?? 10;
+    setValue("cfg-contracts", maxCt);
+    updatePassMeter();
+  }
 }
-window.updateAccountSize = updateAccountSize;
+window.updateAccountCombineSize = updateAccountCombineSize;
+
+function toggleAccountAutoScale(i, checked) {
+  _settingsAccounts[i].autoScale = checked;
+  if (checked && _settingsAccounts[i].combineSize) {
+    const maxCt = COMBINE_MAX_CT[_settingsAccounts[i].combineSize] ?? 10;
+    setValue("cfg-contracts", maxCt);
+    updatePassMeter();
+  }
+}
+window.toggleAccountAutoScale = toggleAccountAutoScale;
 
 function removeSettingsAccount(i) {
   _settingsAccounts.splice(i, 1);
@@ -611,7 +523,6 @@ async function fetchAndAddAccount() {
       id:         match.id,
       name:       match.name,
       type:       match.isFunded ? "Funded" : "Combine",
-      size:       detectAccountSize(match.name),  // editable — see renderAccountsList
       strategies: { ...(state.fullConfig?.strategies ?? {}) },
     });
     renderAccountsList(_settingsAccounts);
@@ -737,18 +648,10 @@ async function saveSettings() {
 
   const trading = {
     ...(state.fullConfig?.trading ?? {}),
-    // stopMode/forceFixedStopTicks are NOT a user-facing setting anywhere in this
-    // panel — leave whatever migrateConfig() already set (the fixed-tick model
-    // matching our own locked account) alone. This used to hardcode stopMode to
-    // null on every single save, which silently fell through to STOP_MODE=trail
-    // in main.js's env builder regardless of what migration or config.default.json
-    // intended — found 2026-10-09 while fixing a family member's bot to match ours.
+    stopMode:           null,
     dailyLossLimit:     numVal("cfg-daily-loss"),
     dailyProfitCap:     numVal("cfg-profit-cap"),
-    // Defensive clamp — belt-and-suspenders alongside the live oninput cap,
-    // in case JS state ever drifts from what's in the field.
-    contracts:          Math.min(numVal("cfg-contracts"), _currentContractsCap),
-    autoScaling:        document.getElementById("cfg-auto-scaling")?.checked !== false,
+    contracts:          numVal("cfg-contracts"),
     fundedStartBalance: -1,
   };
 
@@ -833,7 +736,7 @@ if (window.bot) {
     const s  = cfg.strategies ?? {};
     const tf = cfg.trendFilter ?? {};
 
-    _currentMarket = cfg.market ?? "nq";
+    _currentMarket = cfg.market ?? "es";
 
     $contracts.textContent = t.contracts ? `${t.contracts}ct` : "—";
     $sltp.textContent      = (t.stopLossTicks && t.takeProfitTicks)
@@ -920,14 +823,6 @@ if (window.bot) {
     $updateProg.hidden = true;
     $updateBtn.style.display = "block";
     appendLog("SYSTEM", `Update v${version} downloaded — click to install, then reopen the app.`, {});
-  });
-
-  window.bot.on("update-notes", ({ version, notes }) => {
-    const $v = document.getElementById("whats-new-version");
-    const $n = document.getElementById("whats-new-notes");
-    $v.textContent = `Version ${version}`;
-    $n.textContent = (notes || "").trim() || "No details provided for this update.";
-    document.getElementById("overlay-whats-new").hidden = false;
   });
 
   window.bot.on("engine-paused", () => {
