@@ -25,7 +25,9 @@ contextBridge.exposeInMainWorld("bot", {
   // Engine control
   pauseAll:      () => ipcRenderer.invoke("pause-all"),
   resumeAll:     () => ipcRenderer.invoke("resume-all"),
-  exportTrades:  () => ipcRenderer.invoke("export-trades"),
+  exportTrades:    () => ipcRenderer.invoke("export-trades"),
+  exportLogsRange: (range) => ipcRenderer.invoke("export-logs-range", range),
+  clearLogs:       ()      => ipcRenderer.invoke("clear-logs"),
 
   // Auto-updater
   installUpdate: () => ipcRenderer.send("install-update"),
@@ -37,7 +39,7 @@ contextBridge.exposeInMainWorld("bot", {
       "engine-log", "engine-exit", "trade-event",
       "pnl-update", "balance-update", "account-halted",
       "trend-update", "update-available",
-      "update-downloading", "update-progress", "update-ready",
+      "update-downloading", "update-progress", "update-ready", "update-notes",
       "engine-paused", "engine-resumed",
     ];
     if (allowed.includes(channel)) {

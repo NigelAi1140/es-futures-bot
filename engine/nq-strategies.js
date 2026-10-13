@@ -32,6 +32,21 @@ const AM_CLOSE_HM = 1500;
 const PM_OPEN_HM  = 1800;
 const PM_CLOSE_HM = 2000;
 
+// Mon/Fri session window widening — walk-forward backtested 2026-10-06
+// (OOS 9/20-10/6: +$2,100 vs baseline, driven mostly by Monday 18%->42% WR).
+// Tue-Thu keep the standard window; only AM-close and PM-open shift on edge days.
+const AM_CLOSE_EDGE_HM = 1530;
+const PM_OPEN_EDGE_HM  = 1730;
+
+// AM/PM session hours (13:30-20:00 UTC) never cross a CT calendar-day boundary
+// (CT is UTC-5/-6), so plain UTC day-of-week matches CT day-of-week here.
+function isEdgeDow(ts) {
+  const day = new Date(ts * 1000).getUTCDay(); // 0=Sun..6=Sat
+  return day === 1 || day === 5; // Monday or Friday
+}
+function amCloseHM(ts) { return isEdgeDow(ts) ? AM_CLOSE_EDGE_HM : AM_CLOSE_HM; }
+function pmOpenHM(ts)  { return isEdgeDow(ts) ? PM_OPEN_EDGE_HM  : PM_OPEN_HM; }
+
 // ── Per-day gate sets (cleared by resetConfRevState at daily reset) ───────────
 const _amVwapFiredL    = new Set();
 const _amVwapFiredS    = new Set();
@@ -117,7 +132,7 @@ function _updateADRCache(bars, today) {
     const dt = barDate(b.time);
     if (dt >= today) continue;
     const hm = barHM(b.time);
-    if (hm < AM_OPEN_HM || hm >= AM_CLOSE_HM) continue;
+    if (hm < AM_OPEN_HM || hm >= amCloseHM(b.time)) continue;
     if (!_adrDayCache.has(dt)) _adrDayCache.set(dt, { hi: b.high, lo: b.low });
     else { const r = _adrDayCache.get(dt); r.hi = Math.max(r.hi, b.high); r.lo = Math.min(r.lo, b.low); }
   }
@@ -160,8 +175,8 @@ export const evaluateNQ = (bars, _esBars = []) => {
   const today = barDate(last.time);
   const c     = last.close;
 
-  const inAM = hm >= AM_OPEN_HM && hm < AM_CLOSE_HM;
-  const inPM = hm >= PM_OPEN_HM && hm < PM_CLOSE_HM;
+  const inAM = hm >= AM_OPEN_HM && hm < amCloseHM(last.time);
+  const inPM = hm >= pmOpenHM(last.time) && hm < PM_CLOSE_HM;
   if (!inAM && !inPM) return [];
 
   _updateADRCache(bars, today);
@@ -181,7 +196,7 @@ export const evaluateNQ = (bars, _esBars = []) => {
   // ─── NQ_AM_VWAP_FADE_L / NQ_AM_VWAP_FADE_S — AM Session VWAP Fade ───────────
   // v52-full: short dev ≥25t, TP 48t. 1L+1S per day.
   if (inAM) {
-    const vwap = sessionVWAP(bars, today, AM_OPEN_HM, AM_CLOSE_HM);
+    const vwap = sessionVWAP(bars, today, AM_OPEN_HM, amCloseHM(last.time));
     if (vwap !== null) {
       const devT = (c - vwap) / TICK;
       if (!_amVwapFiredL.has(today) && devT <= -25) {
@@ -269,7 +284,7 @@ export const evaluateNQ = (bars, _esBars = []) => {
   // ─── NQ_PM_VWAP_FADE_L / NQ_PM_VWAP_FADE_S — PM Session VWAP Fade ───────────
   // v52-full: short dev ≥25t, TP 48t. 1L+1S per day.
   if (inPM) {
-    const vwap = sessionVWAP(bars, today, PM_OPEN_HM, PM_CLOSE_HM);
+    const vwap = sessionVWAP(bars, today, pmOpenHM(last.time), PM_CLOSE_HM);
     if (vwap !== null) {
       const devT = (c - vwap) / TICK;
       if (!_pmVwapFiredL.has(today) && devT <= -40) {
@@ -291,8 +306,8 @@ export const evaluateNQ = (bars, _esBars = []) => {
   // Fires at 12–24t VWAP deviation (below the existing AM_VWAP threshold of 25t).
   // AM and PM sessions. 1L + 1S per session. TP 56t, stop 6t.
   if (inAM || inPM) {
-    const tvOpenHM  = inAM ? AM_OPEN_HM : PM_OPEN_HM;
-    const tvCloseHM = inAM ? AM_CLOSE_HM : PM_CLOSE_HM;
+    const tvOpenHM  = inAM ? AM_OPEN_HM : pmOpenHM(last.time);
+    const tvCloseHM = inAM ? amCloseHM(last.time) : PM_CLOSE_HM;
     const tvVwap = sessionVWAP(bars, today, tvOpenHM, tvCloseHM);
     if (tvVwap !== null) {
       const devT = (c - tvVwap) / TICK;
@@ -382,6 +397,14 @@ export const evaluateNQ = (bars, _esBars = []) => {
       }
     }
   }
+
+  // Anchor the stop to the actual signal bar's range instead of a naive flat
+  // distance from the fill price — mirrors strategies.js (ES). Without this,
+  // every NQ signal falls back to a flat stopTicks-from-fill stop (topstepx-engine.js
+  // only applies the barLow/barHigh-aware stop when both are present), which for a
+  // 6-tick (1.5pt) NQ stop is often inside a single bar's normal noise range —
+  // trades were getting swept within seconds of fill regardless of real signal quality.
+  for (const sig of signals) { sig.barHigh = last.high; sig.barLow = last.low; }
 
   return signals;
 };

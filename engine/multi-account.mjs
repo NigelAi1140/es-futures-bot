@@ -271,12 +271,25 @@ function flushBundle(type) {
         trendStatus === 'UPTREND'   ? '📈 UPTREND — shorts suppressed' :
         trendStatus === 'DOWNTREND' ? '📉 DOWNTREND — longs suppressed' :
         trendStatus === 'NEUTRAL'   ? '↔️  NEUTRAL — all signals active' :
-                                      `⏳ PENDING — fires ~7:15 AM ${tz}`;
+                                      `⏳ PENDING — fires ${tz === 'MDT' ? '7:15 AM' : '6:15 AM'} ${tz}`;
 
       // Regime: all accounts share the same overnight range calc
       const regimeLine = range != null
         ? (range < 30 ? `🔴 TIGHT ${range}pts — 1ct cap` : range < 50 ? `🟡 NARROW ${range}pts — scaled` : `🟢 WIDE ${range}pts — full size`)
         : 'Range: N/A';
+
+      // Volume vs 20-bar average — same market data across accounts on the same symbol
+      const volPct = evs.find(e => e.volPct != null)?.volPct;
+      const volLine = volPct != null
+        ? `${volPct}% of avg ${volPct >= 120 ? '✅' : volPct >= 80 ? '⚠️' : '🔇 quiet'}`
+        : 'N/A';
+
+      // Overbought gate — shared directional-persistence filter
+      const overboughtLine = evs.some(e => e.upPctOverbought) ? '🔴 ACTIVE — trending strats suppressed' : '✅ Off';
+
+      // Any account halted (DLL hit) — should be rare at pre-session since it resets
+      // daily, but worth surfacing immediately if a stuck state carried over.
+      const haltedAccts = accountNames.filter(n => eventMap.get(n)?.haltedToday);
 
       title = `📊 Pre-session — ${eventMap.size}/${accounts.length} ready`;
 
@@ -299,8 +312,9 @@ function flushBundle(type) {
         }
 
         const ddStr = ev.ddBuffer != null ? ` DD:$${ev.ddBuffer}left` : '';
+        const haltStr = ev.haltedToday ? ' 🛑HALTED' : '';
 
-        return `${lpad(accountLabels[n])} ${ctStr}${balStr}${progressStr}${ddStr}`;
+        return `${lpad(accountLabels[n])} ${ctStr}${balStr}${progressStr}${ddStr}${haltStr}`;
       }).join('\n');
 
       // Streak — use first funded account, or first account
@@ -318,9 +332,12 @@ function flushBundle(type) {
         `Regime: ${regimeLine}`,
         `Trend:  ${trendLine}`,
         `Streak: ${streakStr}`,
+        `Vol:    ${volLine}`,
+        `Overbought gate: ${overboughtLine}`,
         `News: ${news}  |  FOMC: ${hasFOMC ? 'YES ⚠️' : 'No'}`,
-        `AM 7:45 ${tz}  |  PM 12:30–2:00 ${tz}`,
-      ].join('\n');
+        haltedAccts.length ? `🛑 HALTED: ${haltedAccts.map(n => accountLabels[n]).join(', ')}` : null,
+        `AM ${tz === 'MDT' ? '7:30' : '6:30'} ${tz}  |  PM ${tz === 'MDT' ? '12:00 PM–2:00 PM' : '11:00 AM–1:00 PM'} ${tz}`,
+      ].filter(Boolean).join('\n');
       break;
     }
 
@@ -388,6 +405,10 @@ const pad    = (name) => `[${name.padEnd(maxLen)}]`;
 function startAccount(account) {
   const { name, engine_type, TV_USER, TV_API_KEY, ALPACA_KEY, ALPACA_SECRET, NTFY_CHANNEL, ...extras } = account;
   const isAlpaca = engine_type === "alpaca";
+  // Explicit sequential index for the entry-stagger calculation — recomputed from
+  // the account's position in accounts.json each call (stable across restarts).
+  // Never derived from parsing the account name/label.
+  const accountIdx = Math.max(0, accounts.findIndex(a => a.name === name));
 
   if (isAlpaca) {
     if (!ALPACA_KEY || !ALPACA_SECRET) {
@@ -416,7 +437,9 @@ function startAccount(account) {
         ...(NTFY_CHANNEL ? { NTFY_CHANNEL } : {}),
         ...extras,
         ACCOUNT_LABEL: name,
+        ACCOUNT_IDX: String(accountIdx),
         MULTI_ACCOUNT: "1",
+        BUNDLE_CONSUMER: "1",
       }
     : {
         ...process.env,
@@ -425,7 +448,9 @@ function startAccount(account) {
         ...(NTFY_CHANNEL ? { NTFY_CHANNEL } : {}),
         ...extras,
         ACCOUNT_LABEL: name,
+        ACCOUNT_IDX: String(accountIdx),
         MULTI_ACCOUNT: "1",
+        BUNDLE_CONSUMER: "1",
       };
 
   const engineScript = isAlpaca ? ENGINE_ALPACA : ENGINE_TSX;

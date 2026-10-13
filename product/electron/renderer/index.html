@@ -77,6 +77,23 @@
   <button id="update-bar-btn" onclick="window.bot?.installUpdate()">RESTART TO UPDATE</button>
 </div>
 
+<!-- What's new overlay (shown once, first boot after an auto-update) -->
+<div id="overlay-whats-new" class="overlay" hidden>
+  <div class="overlay-box settings-box">
+    <div class="settings-header">
+      <span class="overlay-title" style="margin:0">WHAT'S NEW</span>
+      <button class="wbtn wbtn-close" onclick="closeWhatsNew()" style="-webkit-app-region:no-drag">✕</button>
+    </div>
+    <div class="settings-body settings-body-v2">
+      <div id="whats-new-version" style="font-size:11px;opacity:0.7;margin-bottom:8px"></div>
+      <div id="whats-new-notes" style="font-size:12px;line-height:1.6;white-space:pre-wrap"></div>
+    </div>
+    <div class="settings-footer">
+      <button class="btn-primary" onclick="closeWhatsNew()">GOT IT</button>
+    </div>
+  </div>
+</div>
+
 <!-- License check overlay -->
 <div id="overlay-license" class="overlay" hidden>
   <div class="overlay-box">
@@ -98,9 +115,9 @@
 
       <!-- MARKET -->
       <div class="settings-section-label">MARKET</div>
-      <div class="mkt-checks-row">
-        <label class="mkt-check-label"><input type="checkbox" id="cfg-mkt-es" onchange="onMarketCheck('es',this.checked)"> <span>ES</span></label>
-        <label class="mkt-check-label"><input type="checkbox" id="cfg-mkt-nq" onchange="onMarketCheck('nq',this.checked)"> <span>NQ</span></label>
+      <div class="field-row" style="opacity:0.8">
+        <span class="field-k">Symbol</span>
+        <span class="field-rec" style="font-size:10px;opacity:0.75">NQ (Nasdaq-100) only</span>
       </div>
 
       <!-- STRATEGIES (read-only) -->
@@ -109,6 +126,14 @@
 
       <!-- RISK -->
       <div class="settings-section-label" style="margin-top:14px">RISK</div>
+      <div class="field-row" style="opacity:0.8">
+        <span class="field-k">Stop Loss</span>
+        <span class="field-rec" style="font-size:10px;opacity:0.75">Fixed 10 ticks — not user-configurable</span>
+      </div>
+      <div class="field-row" style="opacity:0.8;margin-bottom:10px">
+        <span class="field-k">Take Profit</span>
+        <span class="field-rec" style="font-size:10px;opacity:0.75">Set per-strategy — not user-configurable</span>
+      </div>
       <div id="acct-size-banner" class="acct-size-banner" style="display:none"></div>
       <div id="acct-size-manual-row" class="acct-size-manual-row" style="display:none">
         <span class="field-k" style="font-size:10px;opacity:0.65">Account size</span>
@@ -120,10 +145,16 @@
         </select>
       </div>
       <label class="field-row">
-        <span class="field-k">Max Contracts</span>
-        <input class="field-v field-v-sm" type="number" id="cfg-contracts" min="1" max="15" placeholder="2">
+        <span class="field-k">Auto Scaling</span>
+        <input type="checkbox" id="cfg-auto-scaling" checked onchange="onAutoScalingChange(this.checked)">
+        <span class="field-rec" id="auto-scaling-hint" style="font-size:10px;opacity:0.65">cushion-based sizing</span>
+      </label>
+      <label class="field-row">
+        <span class="field-k" id="contracts-label">Max Contracts</span>
+        <input class="field-v field-v-sm" type="number" id="cfg-contracts" min="1" max="15" placeholder="2" oninput="onContractsInput()">
         <span class="field-rec" id="rec-contracts">—</span>
       </label>
+      <div id="contracts-cap-label" style="font-size:9px;opacity:0.5;margin:-4px 0 6px 0"></div>
       <label class="field-row">
         <span class="field-k">Daily Loss Limit</span>
         <span class="field-unit">$<input class="field-v" type="number" id="cfg-daily-loss" min="100" max="10000" placeholder="750"></span>
@@ -152,6 +183,23 @@
         <input class="field-v" type="text" id="cfg-ntfy" placeholder="your-topic-name" style="width:140px">
         <span class="field-rec" style="font-size:9px;opacity:0.7">ntfy.sh/…</span>
       </label>
+
+      <!-- SUPPORT -->
+      <div class="settings-section-label" style="margin-top:14px">SUPPORT</div>
+      <div class="field-row">
+        <span class="field-k">Export Logs</span>
+        <input class="field-v field-v-sm" type="date" id="log-export-start" style="width:118px">
+        <span style="opacity:0.5;font-size:10px">to</span>
+        <input class="field-v field-v-sm" type="date" id="log-export-end" style="width:118px">
+      </div>
+      <div style="margin:4px 0 2px 0">
+        <button class="btn-secondary" style="padding:2px 10px;font-size:10px" onclick="exportLogsRange()">⬇ EXPORT LOGS FOR RANGE</button>
+        <span id="log-export-msg" style="font-size:9px;opacity:0.7;margin-left:6px"></span>
+      </div>
+      <div style="margin:6px 0 2px 0">
+        <button class="btn-secondary" style="padding:2px 10px;font-size:10px;color:var(--red,#e06060)" onclick="clearLogs()">🗑 CLEAR SAVED LOGS</button>
+        <span id="log-clear-msg" style="font-size:9px;opacity:0.7;margin-left:6px"></span>
+      </div>
 
     </div>
 
