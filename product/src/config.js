@@ -68,6 +68,20 @@ const REMOVED_STRATEGIES = [
   "BB_SQ_L", "VWAP_RECLAIM_L", "EMAXPB_L", "EMAXPB_S", "EMA50_PB_L",
   "EMAFAN_S", "BB_FADE_L", "STOCH_L", "STOCH_S", "KELT_S",
   "ORB_L", "INSIDE_BAR_BO_L", "INSIDE_BAR_BO_S",
+  // V5.7 NQ signals removed 2026-10-12/13 — shipped with no profitability
+  // backtest, found to have no standalone edge at any parameterization
+  // across a 20-month and current-regime backtest (0% WR). Without this
+  // entry, an EXISTING install's already-saved config.json keeps whatever
+  // strategy toggles it had before this update — config.default.json and
+  // the NQ_DEFAULT_STRATEGIES fallback in main.js only ever apply to new
+  // installs or installs with zero valid NQ strategies configured, neither
+  // of which covers an existing working install. This is the actual fix
+  // that reaches everyone already set up, not just new installs.
+  "NQ_TIGHT_VWAP_AM_L", "NQ_TIGHT_VWAP_AM_S",
+  "NQ_HILOW_REJ_AM_L", "NQ_HILOW_REJ_AM_S",
+  "NQ_MOM_EXHAUST_AM_L", "NQ_MOM_EXHAUST_AM_S",
+  "NQ_PULLBACK_AM_L", "NQ_PULLBACK_AM_S",
+  "NQ_OB_FADE_S",
 ];
 
 // V3 strategies added in v1.1.41 — enable by default in any upgraded config.
