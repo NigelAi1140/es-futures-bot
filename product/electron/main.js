@@ -11,7 +11,7 @@
 
 import { app, BrowserWindow, ipcMain, shell } from "electron";
 import { spawn }            from "child_process";
-import { existsSync, readFileSync } from "fs";
+import { existsSync, readFileSync, mkdirSync, appendFileSync, readdirSync, statSync, unlinkSync } from "fs";
 import { resolve, dirname, join } from "path";
 import { fileURLToPath }    from "url";
 
@@ -48,6 +48,22 @@ const IS_PKG    = app.isPackaged;
 const CONFIG_PATH = IS_PKG
   ? join(app.getPath("userData"), "config.json")
   : resolve(ROOT, "config.json");
+
+// Daily engine log files, kept outside the app bundle (userData) when packaged
+// so they survive auto-updates instead of getting wiped with the old resources dir.
+const LOGS_DIR = IS_PKG
+  ? join(app.getPath("userData"), "logs")
+  : resolve(ROOT, "../logs");
+if (!existsSync(LOGS_DIR)) mkdirSync(LOGS_DIR, { recursive: true });
+
+function logToFile(accountName, line, isErr = false) {
+  try {
+    const day = new Date().toISOString().slice(0, 10);
+    const path = join(LOGS_DIR, `engine-${day}.log`);
+    const ts = new Date().toISOString();
+    appendFileSync(path, `[${ts}] [${accountName}]${isErr ? " [ERR]" : ""} ${line}\n`);
+  } catch { /* non-fatal — never let logging itself break the engine */ }
+}
 
 // ── Window references ─────────────────────────────────────────────────────────
 let mainWin   = null;
@@ -274,15 +290,17 @@ function startAlpacaEngine(config) {
 
   const emit = (line) => {
     mainWin?.webContents.send("engine-log", { account: name, line });
+    logToFile(name, line);
     const pnlMatch = line.match(/P&L.*?(-?\$[\d,.]+)/);
     const balMatch = line.match(/balance=\$([0-9,.]+)/);
     if (pnlMatch) mainWin?.webContents.send("pnl-update",     { account: name, pnl:     pnlMatch[1] });
     if (balMatch) mainWin?.webContents.send("balance-update",  { account: name, balance: balMatch[1] });
   };
   proc.stdout.on("data", buf => buf.toString().split("\n").filter(Boolean).forEach(emit));
-  proc.stderr.on("data", buf => buf.toString().split("\n").filter(Boolean).forEach(l =>
-    mainWin?.webContents.send("engine-log", { account: name, line: l, isErr: true })
-  ));
+  proc.stderr.on("data", buf => buf.toString().split("\n").filter(Boolean).forEach(l => {
+    mainWin?.webContents.send("engine-log", { account: name, line: l, isErr: true });
+    logToFile(name, l, true);
+  }));
   proc.on("close", (code, signal) => {
     mainWin?.webContents.send("engine-exit", { account: name, code, signal });
     if (entry.paused || code === 0) return;
@@ -343,6 +361,7 @@ function startAccount(account, config) {
   const emit = (line) => {
     if (!line.startsWith("[BUNDLE]")) {
       mainWin?.webContents.send("engine-log", { account: account.name, line });
+      logToFile(account.name, line);
 
       // Parse structured events for the dashboard
       const tradeMatch  = line.match(/\[(?:Order|Trade)\].*?(LONG|SHORT).*?(\d+)ct/);
@@ -362,6 +381,7 @@ function startAccount(account, config) {
   proc.stdout.on("data", buf => buf.toString().split("\n").filter(Boolean).forEach(emit));
   proc.stderr.on("data", buf => buf.toString().split("\n").filter(Boolean).forEach(l => {
     mainWin?.webContents.send("engine-log", { account: account.name, line: l, isErr: true });
+    logToFile(account.name, l, true);
     if (l.includes("[FATAL]")) entry.lastFatal = l.replace("[FATAL]", "").trim();
   }));
 
@@ -515,6 +535,42 @@ ipcMain.handle("export-trades", async () => {
 
     const csv = [headers.join(","), ...rows].join("\n");
     return { ok: true, csv, count: records.length };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+// Rolling 7-day window ending today — replaces the old manual date-range
+// picker so a user can just hit one button instead of picking two dates.
+ipcMain.handle("export-logs-week", async () => {
+  try {
+    const end = new Date().toISOString().slice(0, 10);
+    const start = new Date(Date.now() - 6 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+    const files = readdirSync(LOGS_DIR)
+      .filter(f => /^engine-\d{4}-\d{2}-\d{2}\.log$/.test(f))
+      .map(f => ({ f, day: f.slice(7, 17) }))
+      .filter(({ day }) => day >= start && day <= end)
+      .sort((a, b) => a.day.localeCompare(b.day));
+    if (!files.length) return { ok: false, error: "No logs found for this week yet." };
+    const text = files
+      .map(({ f, day }) => `===== ${day} =====\n` + readFileSync(join(LOGS_DIR, f), "utf8"))
+      .join("\n");
+    return { ok: true, text, days: files.length, start, end };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+ipcMain.handle("clear-logs", async () => {
+  try {
+    const files = readdirSync(LOGS_DIR).filter(f => /^engine-\d{4}-\d{2}-\d{2}\.log$/.test(f));
+    let freedBytes = 0;
+    for (const f of files) {
+      const p = join(LOGS_DIR, f);
+      try { freedBytes += statSync(p).size; } catch {}
+      try { unlinkSync(p); } catch {}
+    }
+    return { ok: true, count: files.length, freedMB: (freedBytes / (1024 * 1024)).toFixed(1) };
   } catch (e) {
     return { ok: false, error: e.message };
   }

@@ -26,6 +26,8 @@ contextBridge.exposeInMainWorld("bot", {
   pauseAll:      () => ipcRenderer.invoke("pause-all"),
   resumeAll:     () => ipcRenderer.invoke("resume-all"),
   exportTrades:  () => ipcRenderer.invoke("export-trades"),
+  exportLogsWeek: () => ipcRenderer.invoke("export-logs-week"),
+  clearLogs:      () => ipcRenderer.invoke("clear-logs"),
 
   // Auto-updater
   installUpdate: () => ipcRenderer.send("install-update"),

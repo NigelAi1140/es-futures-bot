@@ -445,6 +445,40 @@ async function exportTradeHistory() {
 }
 window.exportTradeHistory = exportTradeHistory;
 
+async function exportLogsWeek() {
+  const msg = document.getElementById("log-export-msg");
+  msg.textContent = "Exporting…";
+  try {
+    const result = await window.bot.exportLogsWeek();
+    if (!result.ok) { msg.textContent = `⚠ ${result.error}`; return; }
+    const blob = new Blob([result.text], { type: "text/plain" });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement("a");
+    a.href     = url;
+    a.download = `oracle-logs-${result.start}_to_${result.end}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    msg.textContent = `✓ Exported ${result.days} day(s) of logs`;
+    setTimeout(() => { msg.textContent = ""; }, 4000);
+  } catch (e) { msg.textContent = `⚠ Export failed: ${e.message}`; }
+}
+window.exportLogsWeek = exportLogsWeek;
+
+async function clearLogs() {
+  const msg = document.getElementById("log-clear-msg");
+  if (!confirm("Delete all saved daily logs from this computer? This can't be undone — export anything you need first.")) return;
+  msg.textContent = "Clearing…";
+  try {
+    const result = await window.bot.clearLogs();
+    if (!result.ok) { msg.textContent = `⚠ ${result.error}`; return; }
+    msg.textContent = `✓ Cleared ${result.count} log file(s), freed ${result.freedMB}MB`;
+    setTimeout(() => { msg.textContent = ""; }, 5000);
+  } catch (e) { msg.textContent = `⚠ Clear failed: ${e.message}`; }
+}
+window.clearLogs = clearLogs;
+
 function renderAccountsList(accounts) {
   _settingsAccounts = accounts.map(a => ({ ...a }));
   const list = document.getElementById("settings-accounts-list");
