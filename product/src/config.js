@@ -159,6 +159,13 @@ function migrateConfig(cfg) {
     }
   }
 
+  // v1.2.40: multi-account removed. One TopstepX login = one live API session, so a second engine on the same
+  // login kicks the first off and both place orders. Keep the first account only.
+  if (Array.isArray(cfg.broker?.accounts) && cfg.broker.accounts.length > 1) {
+    cfg.broker.accounts = [cfg.broker.accounts.find(a => a.id) ?? cfg.broker.accounts[0]];
+    changed = true;
+  }
+
   // All versions: strip removed strategies from per-account strategy overrides.
   if (Array.isArray(cfg.broker?.accounts)) {
     for (const acc of cfg.broker.accounts) {

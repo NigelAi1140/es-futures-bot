@@ -551,14 +551,15 @@ async function fetchAndAddAccount() {
 
     const match = result.accounts.find(a => a.last4 === last4 || a.nameLast4 === last4);
     if (!match) { msg.textContent = "No account with those digits"; return; }
-    if (_settingsAccounts.some(a => a.id === match.id)) { msg.textContent = "Already added"; return; }
+    if (_settingsAccounts.length === 1 && _settingsAccounts[0].id === match.id) { msg.textContent = "Already set"; return; }
 
-    _settingsAccounts.push({
+    // One account only (one TopstepX login = one live API session): choosing an account replaces the current one.
+    _settingsAccounts = [{
       id:         match.id,
       name:       match.name,
       type:       match.isFunded ? "Funded" : "Combine",
       strategies: { ...(state.fullConfig?.strategies ?? {}) },
-    });
+    }];
     renderAccountsList(_settingsAccounts);
   } catch (e) {
     msg.textContent = e.message;

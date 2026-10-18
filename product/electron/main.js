@@ -247,7 +247,11 @@ function launchEngines(config) {
   if (config.broker.type === "alpaca") {
     startAlpacaEngine(config);
   } else {
-    config.broker.accounts.filter(a => a.id).forEach((acc, i) => {
+    // One TopstepX login allows one live API session, so only ONE account can run (a second engine kicks
+    // the first one off and both place orders). Multi-account was removed 2026-10-17; the first account wins.
+    const runnable = config.broker.accounts.filter(a => a.id);
+    if (runnable.length > 1) console.warn(`[Engine] ${runnable.length} accounts configured — only "${runnable[0].name}" will run.`);
+    runnable.slice(0, 1).forEach((acc, i) => {
       setTimeout(() => startAccount(acc, config), i * 2000);
     });
   }
@@ -314,6 +318,8 @@ function startAccount(account, config) {
   const entry = procs.get(account.name) ?? { restarts: 0, paused: false };
   if (entry.paused)              return;
   if (entry.restarts >= MAX_RESTARTS) return;
+  // Never spawn a second engine for an account whose engine is still alive.
+  if (entry.proc && entry.proc.exitCode === null && entry.proc.signalCode === null && !entry.proc.killed) return;
 
   const t = config.trading;
   const f = config.trendFilter;
@@ -347,6 +353,7 @@ function startAccount(account, config) {
     FUNDED_START_BALANCE: String(t.fundedStartBalance ?? 0),
     ENABLED_STRATEGIES:   enabledStrats,
     MULTI_ACCOUNT:      "1",
+    PARENT_PID:         String(process.pid),
     ACCOUNT_LABEL:      account.name,
     ...(config.notifications?.enabled && config.notifications?.ntfyChannel ? { NTFY_CHANNEL: config.notifications.ntfyChannel } : {}),
   };
