@@ -159,6 +159,16 @@ function migrateConfig(cfg) {
     }
   }
 
+  // v1.2.42: Mon/Fri contract cap (2ct) on for everyone — matches the main account's scaling rule. The old default was
+  // off and was never wired to the engine, so existing configs carry scaleEdgeDayCap:false. Applied once; a later
+  // manual change sticks.
+  if (cfg.trading && !cfg.edgeCapMigrated) {
+    cfg.trading.scaleEdgeDayCap = true;
+    cfg.trading.scaleEdgeDayCapContracts = cfg.trading.scaleEdgeDayCapContracts ?? 2;
+    cfg.edgeCapMigrated = true;
+    changed = true;
+  }
+
   // v1.2.40: multi-account removed. One TopstepX login = one live API session, so a second engine on the same
   // login kicks the first off and both place orders. Keep the first account only.
   if (Array.isArray(cfg.broker?.accounts) && cfg.broker.accounts.length > 1) {
@@ -191,6 +201,7 @@ function validateConfig(cfg) {
   check(t.trailTicks,       4, 20,    "trading.trailTicks");
   check(t.dailyLossLimit,  10, 50000, "trading.dailyLossLimit");
   check(t.dailyProfitCap,  10, 50000, "trading.dailyProfitCap");
+  if (t.scaleEdgeDayCapContracts != null) check(t.scaleEdgeDayCapContracts, 1, 15, "trading.scaleEdgeDayCapContracts");
 
   if (isAlpaca) {
     if (!cfg.broker?.alpacaKey)    throw new Error("broker.alpacaKey is required for Alpaca paper trading.");

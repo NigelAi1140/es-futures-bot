@@ -31,7 +31,8 @@
     "fundedScaleTiers":     "1500:4,2000:5,3000:10",
     "fundedScaleBaseStep":  1000,
     "fundedScalePostStep":  2000,
-    "scaleEdgeDayCap":      false
+    "scaleEdgeDayCap":      true,
+    "scaleEdgeDayCapContracts": 2
   },
 
   "strategies": {

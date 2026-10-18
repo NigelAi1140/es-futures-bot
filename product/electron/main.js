@@ -338,6 +338,9 @@ function startAccount(account, config) {
     SYMBOL:             config.market === "nq" ? "NQ" : (config.broker.symbol ?? "ES"),
     MARKET:             config.market ?? "es",
     MAX_CONTRACTS:      String(t.contracts),
+    SCALE_EDGE_DAY_CAP:           t.scaleEdgeDayCap ? "1" : "0",
+    SCALE_EDGE_DAY_CAP_CONTRACTS: String(t.scaleEdgeDayCapContracts ?? 2),
+    SCALE_EDGE_DAY_CAP_ALL:       "1",   // Combine accounts too, not just funded
     STOP_MODE:          t.stopMode ?? "trail",
     STOP_LOSS_TICKS:    String(t.stopLossTicks),
     MAX_STOP_TICKS:     String(t.maxStopTicks),
