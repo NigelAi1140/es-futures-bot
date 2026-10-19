@@ -780,7 +780,8 @@ if (window.bot) {
     $dailyLim.textContent  = t.dailyLossLimit  ? `$${t.dailyLossLimit}`  : "—";
     $profitCap.textContent = t.dailyProfitCap  ? `$${t.dailyProfitCap}` : "—";
 
-    const stratCount = Object.values(s).filter(Boolean).length;
+    // On NQ only the NQ_ signals can trade; the ES-era entries kept in the config are inert and shouldn't inflate the count.
+    const stratCount = Object.entries(s).filter(([k, v]) => v && (_currentMarket !== "nq" || k.startsWith("NQ_"))).length;
     $stratCt.textContent = `${stratCount} active · ${_currentMarket.toUpperCase()}`;
 
     if (cfg.accounts && cfg.accounts.length > 0) {

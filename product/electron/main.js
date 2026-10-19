@@ -357,6 +357,7 @@ function startAccount(account, config) {
     ENABLED_STRATEGIES:   enabledStrats,
     MULTI_ACCOUNT:      "1",
     PARENT_PID:         String(process.pid),
+    ACCOUNT_IDX:        "0",   // exactly one account runs, so its stagger index is always 0 (silences the engine's label-parsing warning)
     ACCOUNT_LABEL:      account.name,
     ...(config.notifications?.enabled && config.notifications?.ntfyChannel ? { NTFY_CHANNEL: config.notifications.ntfyChannel } : {}),
   };

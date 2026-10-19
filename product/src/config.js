@@ -82,6 +82,8 @@ const REMOVED_STRATEGIES = [
   "NQ_MOM_EXHAUST_AM_L", "NQ_MOM_EXHAUST_AM_S",
   "NQ_PULLBACK_AM_L", "NQ_PULLBACK_AM_S",
   "NQ_OB_FADE_S",
+  // v1.2.43: IDs the engine has never recognised (an old default list used them); they only inflated the "active" count.
+  "NQ_14H_REV", "NQ_ADR_EXHAUST_S",
 ];
 
 // V3 strategies added in v1.1.41 — enable by default in any upgraded config.
@@ -97,13 +99,12 @@ const DEFAULT_ON_STRATEGIES = {
 
 // NQ V5.3 strategies — default on when NQ market is active.
 const NQ_DEFAULT_ON_STRATEGIES = {
-  NQ_OB_FADE_S:      true,
-  NQ_AM_VWAP_FADE_S: true,
-  NQ_ADR_FADE_S:     true,
-  NQ_14H_REV:        true,
-  NQ_FIRST30_FADE_S: true,
-  NQ_PM_VWAP_FADE_S: true,
-  NQ_ADR_EXHAUST_S:  true,
+  NQ_AM_VWAP_FADE_S:   true,
+  NQ_ADR_FADE_S:       true,
+  NQ_14H_REV_S:        true,
+  NQ_FIRST30_FADE_S:   true,
+  NQ_OVERNIGHT_TRAP_S: true,
+  NQ_PM_VWAP_FADE_S:   true,
 };
 
 /**
