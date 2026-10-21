@@ -30,6 +30,12 @@ const TICK        = 0.25;
 const AM_OPEN_HM  = 1330;
 const AM_CLOSE_HM = 1500;
 const PM_OPEN_HM  = 1800;
+
+// Mon/Fri session widening (walk-forward backtested 2026-10-06): AM close 15:00->15:30, PM open 18:00->17:30.
+// Mirrors topstepx-engine.js's session gate (isTodayScaleEdgeDay): keep both in sync if this ever changes.
+// ADR cache (the 20-day AM-range definition) deliberately stays on the fixed 13:30-15:00 window.
+function amCloseHM(ts) { const d = new Date(ts * 1000).getUTCDay(); return (d === 1 || d === 5) ? 1530 : AM_CLOSE_HM; }
+function pmOpenHM(ts)  { const d = new Date(ts * 1000).getUTCDay(); return (d === 1 || d === 5) ? 1730 : PM_OPEN_HM; }
 const PM_CLOSE_HM = 2000;
 
 // ── Per-day gate sets (cleared by resetConfRevState at daily reset) ───────────
@@ -160,8 +166,9 @@ export const evaluateNQ = (bars, _esBars = []) => {
   const today = barDate(last.time);
   const c     = last.close;
 
-  const inAM = hm >= AM_OPEN_HM && hm < AM_CLOSE_HM;
-  const inPM = hm >= PM_OPEN_HM && hm < PM_CLOSE_HM;
+  const amClose = amCloseHM(last.time), pmOpen = pmOpenHM(last.time);
+  const inAM = hm >= AM_OPEN_HM && hm < amClose;
+  const inPM = hm >= pmOpen && hm < PM_CLOSE_HM;
   if (!inAM && !inPM) return [];
 
   _updateADRCache(bars, today);
@@ -181,7 +188,7 @@ export const evaluateNQ = (bars, _esBars = []) => {
   // ─── NQ_AM_VWAP_FADE_L / NQ_AM_VWAP_FADE_S — AM Session VWAP Fade ───────────
   // v52-full: short dev ≥25t, TP 48t. 1L+1S per day.
   if (inAM) {
-    const vwap = sessionVWAP(bars, today, AM_OPEN_HM, AM_CLOSE_HM);
+    const vwap = sessionVWAP(bars, today, AM_OPEN_HM, amClose);
     if (vwap !== null) {
       const devT = (c - vwap) / TICK;
       if (!_amVwapFiredL.has(today) && devT <= -25) {
@@ -269,7 +276,7 @@ export const evaluateNQ = (bars, _esBars = []) => {
   // ─── NQ_PM_VWAP_FADE_L / NQ_PM_VWAP_FADE_S — PM Session VWAP Fade ───────────
   // v52-full: short dev ≥25t, TP 48t. 1L+1S per day.
   if (inPM) {
-    const vwap = sessionVWAP(bars, today, PM_OPEN_HM, PM_CLOSE_HM);
+    const vwap = sessionVWAP(bars, today, pmOpen, PM_CLOSE_HM);
     if (vwap !== null) {
       const devT = (c - vwap) / TICK;
       if (!_pmVwapFiredL.has(today) && devT <= -40) {
@@ -291,8 +298,8 @@ export const evaluateNQ = (bars, _esBars = []) => {
   // Fires at 12–24t VWAP deviation (below the existing AM_VWAP threshold of 25t).
   // AM and PM sessions. 1L + 1S per session. TP 56t, stop 6t.
   if (inAM || inPM) {
-    const tvOpenHM  = inAM ? AM_OPEN_HM : PM_OPEN_HM;
-    const tvCloseHM = inAM ? AM_CLOSE_HM : PM_CLOSE_HM;
+    const tvOpenHM  = inAM ? AM_OPEN_HM : pmOpen;
+    const tvCloseHM = inAM ? amClose : PM_CLOSE_HM;
     const tvVwap = sessionVWAP(bars, today, tvOpenHM, tvCloseHM);
     if (tvVwap !== null) {
       const devT = (c - tvVwap) / TICK;

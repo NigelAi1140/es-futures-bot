@@ -16,47 +16,155 @@
  */
 
 import axios from "axios";
-import { HubConnectionBuilder, HttpTransportType, LogLevel } from "@microsoft/signalr";
+import { HubConnectionBuilder, HttpTransportType, LogLevel, HubConnectionState } from "@microsoft/signalr";
 import dotenv from "dotenv";
 import { evaluate, evaluateExtended } from "./strategies.js";
 import { evaluateNQ, resetConfRevState } from "./nq-strategies.js";
 import { atr, volumeSMA } from "./indicators.js";
 import { appendFileSync, writeFileSync, openSync, closeSync, unlinkSync, mkdirSync, existsSync, readFileSync } from "fs";
-import { execSync } from "child_process";
-import { resolve, dirname, join } from "path";
+import { execSync, execFileSync } from "child_process";
+import { resolve, dirname, join, basename } from "path";
 import { fileURLToPath } from "url";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
+
+// ─── Replay (backtest) mode ────────────────────────────────────────────────
+// Added 2026-10-13. Every gate in runEvaluate() (trend filter, ATR filter,
+// cooldowns, ENABLED_STRATEGIES whitelist, overbought suppression, early-AM
+// gate, activeDirections slot competition, daily halt/cap) reads real
+// wall-clock time via `new Date()`/`Date.now()`. Three prior standalone
+// backtest scripts tried to reimplement these gates by hand and all came
+// back wrong against real trades.jsonl (one was off by ~4x on trade count
+// even with zero slot-competition modeling) -- this is the real fix: drive
+// the ACTUAL gate code with a controllable clock instead of guessing which
+// gates matter. See feedback_trading.md, "No standalone backtest script can
+// be trusted..." (2026-10-13) for the full history of why this exists.
+//
+// When REPLAY_MODE=1, Date() and Date.now() return a simulated clock that
+// the replay driver advances bar-by-bar, so every gate below runs exactly as
+// it would live, just against historical bars instead of a real feed. Zero
+// effect on live trading: this block is a no-op unless the env var is set,
+// and nothing else in the file changes behavior based on it except the two
+// clearly-marked branch points (the entry order call, and the boot sequence
+// at the bottom of the file).
+const REPLAY_MODE = process.env.REPLAY_MODE === "1";
+let _replayNowMs = null;
+if (REPLAY_MODE) {
+  const RealDate = Date;
+  globalThis.Date = class extends RealDate {
+    constructor(...args) {
+      if (args.length === 0 && _replayNowMs !== null) return new RealDate(_replayNowMs);
+      return new RealDate(...args);
+    }
+    static now() { return _replayNowMs !== null ? _replayNowMs : RealDate.now(); }
+  };
+}
+
+// Packaged Electron apps must NOT store persistent state under process.resourcesPath
+// (join(__dir, "..", "logs")) — that directory lives inside the app bundle and gets
+// wiped and replaced wholesale on every auto-update. main.js passes LOGS_DIR pointing
+// at app.getPath("userData") instead so trade history, peak balance, and session
+// gates survive updates. Falls back to the repo-relative path for dev/CLI usage.
+const LOGS_DIR = process.env.LOGS_DIR || resolve(__dir, "..", "logs");
+
+// Account-scoped id used to namespace every per-account state file below —
+// session gates, peak balance, dayPnL, and trade log all used to share one
+// filename regardless of account, so running 2+ accounts simultaneously (the
+// whole point of multi-account.mjs) would have them silently clobber each
+// other's profit-cap/DLL state, peak balance, and P&L. Only the engine
+// lockfile and seen-trades file were scoped like this before.
+const SAFE_ACCOUNT_ID = String(process.env.ACCOUNT_ID || process.env.TV_USER || 'default').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40);
 
 // ── Per-account engine singleton lockfile ─────────────────────────────────────
 // Prevents a second engine from running for the same account ID if a supervisor
 // crashes and orphans a child — the new supervisor's spawn attempt is blocked here.
 {
-  const accountId  = process.env.ACCOUNT_ID || process.env.TV_USER || 'default';
-  const safeId     = String(accountId).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40);
-  const logsDir    = resolve(__dir, '..', 'logs');
-  mkdirSync(logsDir, { recursive: true });
-  const engineLock = resolve(logsDir, `engine-${safeId}.lock`);
+  const safeId     = SAFE_ACCOUNT_ID;
+  mkdirSync(LOGS_DIR, { recursive: true });
+  const engineLock = resolve(LOGS_DIR, `engine-${safeId}.lock`);
+
+  const writeLock = (blockedCount = 0) => {
+    writeFileSync(engineLock, JSON.stringify({ pid: process.pid, blockedCount }));
+  };
+  const readLock = () => {
+    const raw = readFileSync(engineLock, 'utf8').trim();
+    // Legacy format was a bare PID number — support both.
+    if (/^\d+$/.test(raw)) return { pid: parseInt(raw, 10), blockedCount: 0 };
+    try { return JSON.parse(raw); } catch { return { pid: NaN, blockedCount: 0 }; }
+  };
+
+  // Who holds the lock? See the packaged-app policy in acquireEngineLock. Any lookup failure => 'live' (safe side:
+  // never kill or take over unless we positively identified an unrelated program or an orphaned engine of ours).
+  const classifyLockHolder = (pid) => {
+    try {
+      const me = basename(process.execPath).toLowerCase().slice(0, 20);
+      const image = process.platform === 'win32'
+        ? execFileSync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], { encoding: 'utf8', windowsHide: true, timeout: 8000 })
+        : execFileSync('ps', ['-p', String(pid), '-o', 'comm='], { encoding: 'utf8', timeout: 8000 });
+      if (!image.toLowerCase().includes(me)) return 'unrelated';
+      const ppidRaw = process.platform === 'win32'
+        ? execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").ParentProcessId`], { encoding: 'utf8', windowsHide: true, timeout: 15000 })
+        : execFileSync('ps', ['-p', String(pid), '-o', 'ppid='], { encoding: 'utf8', timeout: 8000 });
+      const ppid = parseInt(ppidRaw.trim(), 10);
+      if (!Number.isFinite(ppid)) return 'live';
+      if (ppid <= 1) return 'orphan'; // reparented to init/launchd
+      try { process.kill(ppid, 0); return 'live'; } catch { return 'orphan'; }
+    } catch { return 'live'; }
+  };
 
   const acquireEngineLock = () => {
     try {
       const fd = openSync(engineLock, 'wx');
-      writeFileSync(fd, String(process.pid));
+      writeFileSync(fd, JSON.stringify({ pid: process.pid, blockedCount: 0 }));
       closeSync(fd);
     } catch (e) {
       if (e.code !== 'EEXIST') throw e;
-      const existingPid = parseInt(readFileSync(engineLock, 'utf8').trim(), 10);
+      const { pid: existingPid, blockedCount = 0 } = readLock();
       let alive = true;
       try { process.kill(existingPid, 0); } catch { alive = false; }
+
+      // PIDs get recycled by the OS — an unrelated process can end up with the
+      // same PID as a crashed/force-killed engine that never released its lock,
+      // making `alive` look true forever even though our engine is long gone.
+      // If 3 separate start attempts have each independently found this EXACT
+      // same PID still "blocking" them, that's far more consistent with a stale
+      // reused PID than a genuinely running duplicate — force-clear it rather
+      // than lock the account out permanently.
+      // Packaged Oracle app (it runs the engine via ELECTRON_RUN_AS_NODE): never "take over" from a live engine.
+      // Two engines on one TopstepX login kick each other off and BOTH place orders (seen 2026-10-16 on a
+      // customer's PC after an update left an old engine running). Classify the lock holder instead:
+      //   unrelated -> recycled PID belonging to some other program: lock is stale
+      //   orphan    -> one of OUR engines whose parent app is gone: stop it, then take over
+      //   live      -> genuine duplicate with a running parent: refuse to start
+      const isProductBuild = process.env.ELECTRON_RUN_AS_NODE === '1';
+      if (alive && isProductBuild) {
+        const verdict = classifyLockHolder(existingPid);
+        if (verdict === 'unrelated') {
+          console.warn(`\n⚠️  Lock holder PID ${existingPid} is an unrelated program (recycled PID) — treating the lock as stale.\n`);
+          alive = false;
+        } else if (verdict === 'orphan') {
+          console.warn(`\n⚠️  Found an orphaned engine (PID ${existingPid}) left over from a previous run of this app — stopping it before starting.\n`);
+          try { process.kill(existingPid, 'SIGKILL'); } catch {}
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500);
+          // Only proceed if it is really gone — if the kill failed (e.g. permissions) we must NOT start a second engine.
+          try { process.kill(existingPid, 0); console.error(`\n❌  Could not stop the orphaned engine (PID ${existingPid}) — not starting a second one.\n`); }
+          catch { alive = false; }
+        }
+      } else if (alive && blockedCount >= 2) {
+        console.warn(`\n⚠️  PID ${existingPid} has blocked engine startup for account ${safeId} ${blockedCount + 1} times in a row — treating as a stale lock (likely a recycled PID from a crashed process) and taking over.\n`);
+        alive = false;
+      }
+
       if (alive) {
-        console.error(`\n❌  Engine for account ${safeId} already running (PID ${existingPid}). Exiting.\n`);
+        console.error(`\n❌  Engine for account ${safeId} already running (PID ${existingPid}). Exiting.${isProductBuild ? '\n    If this keeps repeating: fully quit Oracle Trading System, end any leftover "Oracle Trading System" processes in Task Manager (or restart the computer), then reopen it.' : ''}\n`);
+        try { writeFileSync(engineLock, JSON.stringify({ pid: existingPid, blockedCount: blockedCount + 1 })); } catch {}
         process.exit(1);
       }
       // Stale — remove and retry once
       unlinkSync(engineLock);
       try {
         const fd = openSync(engineLock, 'wx');
-        writeFileSync(fd, String(process.pid));
+        writeFileSync(fd, JSON.stringify({ pid: process.pid, blockedCount: 0 }));
         closeSync(fd);
       } catch {
         console.error(`\n❌  Engine lock race for ${safeId} — another engine won. Exiting.\n`);
@@ -77,14 +185,26 @@ const __dir = dirname(fileURLToPath(import.meta.url));
     });
   };
   acquireEngineLock();
+
+  // The packaged app passes its own PID: if the app dies (crash, force-quit, auto-update) the engine must not
+  // live on as an orphan that keeps trading — and later blocks or doubles up with the next engine.
+  const parentPid = parseInt(process.env.PARENT_PID || '', 10);
+  if (parentPid > 1) {
+    setInterval(() => {
+      try { process.kill(parentPid, 0); }
+      catch (e) {
+        // Only a definite "no such process" counts. EPERM etc. means the parent exists — never shut a live engine down on a doubt.
+        if (e && e.code === 'ESRCH') { console.error('[Engine] Parent app is gone — shutting down so no orphaned engine keeps trading.'); process.exit(0); }
+      }
+    }, 5000);
+  }
 }
 
 // Shared state file — read by cl-forward-test.mjs to gate signals
-const SHARED_STATE_PATH = join(__dir, "..", "logs", "nq-state.json");
+const SHARED_STATE_PATH = join(LOGS_DIR, `nq-state-${SAFE_ACCOUNT_ID}.json`);
 function writeSharedState(dayPnL) {
   try {
-    const logsDir = join(__dir, "..", "logs");
-    if (!existsSync(logsDir)) mkdirSync(logsDir, { recursive: true });
+    if (!existsSync(LOGS_DIR)) mkdirSync(LOGS_DIR, { recursive: true });
     writeFileSync(SHARED_STATE_PATH, JSON.stringify({
       date:      new Date().toISOString().slice(0, 10),
       dayPnL:    +dayPnL.toFixed(2),
@@ -93,15 +213,60 @@ function writeSharedState(dayPnL) {
   } catch { /* non-fatal — CL bot falls back to ungated if file missing */ }
 }
 
+// Peak balance persistence — tracks the all-time high for trailing DD floor
+// calculations. Unlike session gates, this must NEVER reset on restart or
+// date-rollover — TopstepX's trailing DD trails up from the true peak.
+const PEAK_BALANCE_PATH = join(LOGS_DIR, `peak-balance-${SAFE_ACCOUNT_ID}.json`);
+
+function savePeakBalance(peakBalance) {
+  try {
+    if (!existsSync(LOGS_DIR)) mkdirSync(LOGS_DIR, { recursive: true });
+    writeFileSync(PEAK_BALANCE_PATH, JSON.stringify({ peakBalance, updatedAt: new Date().toISOString() }));
+  } catch { /* non-fatal */ }
+}
+
+function loadPeakBalance() {
+  try {
+    if (!existsSync(PEAK_BALANCE_PATH)) return null;
+    const saved = JSON.parse(readFileSync(PEAK_BALANCE_PATH, "utf8"));
+    return typeof saved.peakBalance === "number" ? saved.peakBalance : null;
+  } catch { return null; }
+}
+
+// EOD-locked peak — the actual peak TopstepX's trailing DD floor is based on.
+// Confirmed against TopstepX's published rules (2026-10-09): the floor moves up
+// using the END-OF-DAY closing balance, never continuous intraday highs — "if the
+// balance touches the floor at any point during the session... the account is
+// liquidated," but the floor itself only re-locks once per day. state.peakBalance
+// above updates on every single balance push (correct for the "Peak balance"
+// informational display, wrong for anything computing the real floor/cushion) —
+// this tracks the same thing but only advances at the daily session-reset point,
+// using that moment's balance (= yesterday's close, before today's first trade).
+const EOD_PEAK_PATH = join(LOGS_DIR, `eod-peak-${SAFE_ACCOUNT_ID}.json`);
+
+function saveEodPeakBalance(eodPeakBalance) {
+  try {
+    if (!existsSync(LOGS_DIR)) mkdirSync(LOGS_DIR, { recursive: true });
+    writeFileSync(EOD_PEAK_PATH, JSON.stringify({ eodPeakBalance, updatedAt: new Date().toISOString() }));
+  } catch { /* non-fatal */ }
+}
+
+function loadEodPeakBalance() {
+  try {
+    if (!existsSync(EOD_PEAK_PATH)) return null;
+    const saved = JSON.parse(readFileSync(EOD_PEAK_PATH, "utf8"));
+    return typeof saved.eodPeakBalance === "number" ? saved.eodPeakBalance : null;
+  } catch { return null; }
+}
+
 // Session gate persistence — survives engine restarts during outages.
 // Saves all intra-day filters so a reconnect during the AM session restores
 // the exact gate state rather than re-firing signals with a clean slate.
-const SESSION_GATE_PATH = join(__dir, "..", "logs", "session-gates.json");
+const SESSION_GATE_PATH = join(LOGS_DIR, `session-gates-${SAFE_ACCOUNT_ID}.json`);
 
 function saveSessionGates(state) {
   try {
-    const logsDir = join(__dir, "..", "logs");
-    if (!existsSync(logsDir)) mkdirSync(logsDir, { recursive: true });
+    if (!existsSync(LOGS_DIR)) mkdirSync(LOGS_DIR, { recursive: true });
     writeFileSync(SESSION_GATE_PATH, JSON.stringify({
       date:               new Date().toISOString().slice(0, 10),
       dayPnL:             +state.dayPnL.toFixed(2),
@@ -176,9 +341,15 @@ function computeUpPct() {
   const upPct = comparisons >= 5 ? upCount / comparisons : 0;
   return { upPct, upCount, comparisons, last10 };
 }
-const LOGS_DIR    = resolve(__dir, "../logs");
-const TRADE_LOG   = resolve(LOGS_DIR, "trades.jsonl");   // one JSON object per line
-const WEEKLY_LOG  = resolve(LOGS_DIR, "weekly.jsonl");   // weekly summaries
+const TRADE_LOG   = resolve(LOGS_DIR, `trades-${SAFE_ACCOUNT_ID}.jsonl`);   // one JSON object per line
+// Signals that fired but were blocked by the activeDirections slot gate (same
+// direction already has an open position) leave NO trace anywhere otherwise --
+// added 2026-10-13 so cross-strategy competition/cannibalization is actually
+// measurable instead of invisible. Never affects trading, log-only.
+const BLOCKED_SIGNAL_LOG = resolve(LOGS_DIR, `blocked-signals-${SAFE_ACCOUNT_ID}.jsonl`);
+const WEEKLY_LOG  = resolve(LOGS_DIR, `weekly-${SAFE_ACCOUNT_ID}.jsonl`);   // weekly summaries
+const SL_POSTMORTEM_PATH = resolve(LOGS_DIR, `sl-postmortems-${SAFE_ACCOUNT_ID}.json`);
+const SL_REVIEW_LOG      = resolve(LOGS_DIR, `sl-review-${SAFE_ACCOUNT_ID}.jsonl`);
 
 // Ensure logs directory exists
 if (!existsSync(LOGS_DIR)) mkdirSync(LOGS_DIR, { recursive: true });
@@ -283,6 +454,19 @@ function isTodayWeekend() {
   return day === 0 || day === 6;
 }
 
+// Mon/Fri contract cap is active when enabled AND (account is funded OR the cap is set to apply to every account).
+function edgeDayCapActive() {
+  return CFG.scaleEdgeDayCap && (state.isFunded || CFG.scaleEdgeDayCapAll) && isTodayScaleEdgeDay();
+}
+function isTodayScaleEdgeDay() {
+  // Monday or Friday — the funded-account day-of-week scaling rule pins these
+  // to 1ct regardless of cushion (start/end of week = smaller sample, more gap risk).
+  const ctOffset = isDST() ? -5 : -6;
+  const ct = new Date(Date.now() + ctOffset * 60 * 60 * 1000);
+  const day = ct.getUTCDay(); // 0=Sunday, 1=Monday, 5=Friday, 6=Saturday
+  return day === 1 || day === 5;
+}
+
 function isTodayEarlyClose() {
   const ctOffset = isDST() ? -5 : -6;
   const ct = new Date(Date.now() + ctOffset * 60 * 60 * 1000);
@@ -328,48 +512,98 @@ const TIER1_KEYWORDS = [
   "ISM Manufacturing",
 ];
 
+// The ForexFactory mirror is free and rate-limits (HTTP 429). Cache the week's calendar on disk so a failed fetch never
+// leaves the bot with no news pauses: fresh cache (<12h) is used without a request, a stale cache is the fallback when the
+// live fetch fails, and with no cache at all the fetch is retried a few times and the user is told.
+const NEWS_CACHE_PATH = join(LOGS_DIR, "news-calendar-cache.json");
+const NEWS_FEEDS = { thisweek: "https://nfs.faireconomy.media/ff_calendar_thisweek.json", nextweek: "https://nfs.faireconomy.media/ff_calendar_nextweek.json" };
+const NEWS_RETRY_MIN = [2, 5, 10, 20];
+function newsWeekKey(ctDate) {
+  const t = new Date(ctDate + "T12:00:00Z"); t.setUTCDate(t.getUTCDate() - ((t.getUTCDay() + 6) % 7));
+  return t.toISOString().slice(0, 10);
+}
+function readNewsCache() {
+  try { const c = JSON.parse(readFileSync(NEWS_CACHE_PATH, "utf8")); if (c && typeof c.weeks === "object") return c; } catch {}
+  return { weeks: {} };
+}
+function writeNewsCache(c) {
+  try {
+    const keys = Object.keys(c.weeks).sort(); for (const k of keys.slice(0, Math.max(0, keys.length - 3))) delete c.weeks[k];
+    writeFileSync(NEWS_CACHE_PATH, JSON.stringify(c));
+  } catch (e) { console.warn("[News] could not write calendar cache:", e.message); }
+}
+function applyCalendar(events, source) {
+  const todayCT = ctDateStr();
+  let fomcDay = false;
+  const blocks = [];
+  for (const ev of events) {
+    if (!ev.date?.startsWith(todayCT)) continue;
+    if (ev.impact !== "High") continue;
+    const isTier1 = TIER1_KEYWORDS.some(k => ev.title?.includes(k));
+    if (!isTier1) continue;
+    if (ev.title?.includes("FOMC") || ev.title?.includes("Fed Funds")) fomcDay = true;
+    // ev.date is like "2026-05-28T14:30:00-04:00"
+    const evTime = new Date(ev.date).getTime();
+    blocks.push({ title: ev.title, from: evTime - 10 * 60000, to: evTime + 20 * 60000 });
+  }
+  state.isFOMCDay   = fomcDay;
+  state._newsBlocks = blocks;
+  if (source !== "live") console.log(`[News] Using ${source} calendar data`);
+  if (blocks.length) {
+    console.log(`[News] ${blocks.length} Tier-1 event(s) today — entries paused ±10/20 min:`);
+    blocks.forEach(b => console.log(`       ${b.title} | block ${new Date(b.from).toUTCString()} → ${new Date(b.to).toUTCString()}`));
+  }
+  if (fomcDay) console.log("[News] ⚠️  FOMC day — PM session (18:00–20:00 UTC) disabled");
+}
 async function refreshNewsFilter() {
-  // Skip if already fetched today — avoids 429 on multiple restarts
   const todayKey = ctDateStr();
   if (state._newsFetchedDate === todayKey) {
     console.log("[News] Calendar already loaded for today — skipping fetch");
     return;
   }
-  try {
-    const res = await axios.get("https://nfs.faireconomy.media/ff_calendar_thisweek.json", {
-      timeout: 8000,
-    });
-    const events = res.data || [];
-    const todayCT = ctDateStr();
-    let fomcDay = false;
-    const blocks = [];
-
-    for (const ev of events) {
-      if (!ev.date?.startsWith(todayCT)) continue;
-      if (ev.impact !== "High") continue;
-      const isTier1 = TIER1_KEYWORDS.some(k => ev.title?.includes(k));
-      if (!isTier1) continue;
-
-      if (ev.title?.includes("FOMC") || ev.title?.includes("Fed Funds")) {
-        fomcDay = true;
-      }
-
-      // ev.date is like "2026-05-28T14:30:00-04:00"
-      const evTime = new Date(ev.date).getTime();
-      blocks.push({ title: ev.title, from: evTime - 10 * 60000, to: evTime + 20 * 60000 });
-    }
-
-    state.isFOMCDay      = fomcDay;
-    state._newsBlocks    = blocks;
+  const wk = newsWeekKey(todayKey);
+  const cache = readNewsCache();
+  const cached = cache.weeks[wk];
+  if (cached && Date.now() - cached.fetchedAt < 12 * 3600e3) {
+    applyCalendar(cached.events, `cached (${new Date(cached.fetchedAt).toISOString().slice(0, 16)}Z)`);
     state._newsFetchedDate = todayKey;
-
-    if (blocks.length) {
-      console.log(`[News] ${blocks.length} Tier-1 event(s) today — entries paused ±10/20 min:`);
-      blocks.forEach(b => console.log(`       ${b.title} | block ${new Date(b.from).toUTCString()} → ${new Date(b.to).toUTCString()}`));
+    return;
+  }
+  try {
+    const res = await axios.get(NEWS_FEEDS.thisweek, { timeout: 8000 });
+    const events = Array.isArray(res.data) ? res.data : [];
+    if (!events.length) throw new Error("empty calendar response");
+    cache.weeks[wk] = { fetchedAt: Date.now(), events };
+    writeNewsCache(cache);
+    applyCalendar(events, "live");
+    state._newsFetchedDate = todayKey;
+    state._newsRetry = 0;
+    // Fri/Sat/Sun: grab next week's calendar too so Monday still has data if the feed rate-limits us then.
+    const dow = new Date(todayKey + "T12:00:00Z").getUTCDay();
+    const nextKey = newsWeekKey(new Date(new Date(wk + "T12:00:00Z").getTime() + 7 * 86400e3).toISOString().slice(0, 10));
+    if ((dow === 5 || dow === 6 || dow === 0) && !cache.weeks[nextKey]) {
+      try {
+        const nx = await axios.get(NEWS_FEEDS.nextweek, { timeout: 8000 });
+        if (Array.isArray(nx.data) && nx.data.length) { cache.weeks[nextKey] = { fetchedAt: Date.now(), events: nx.data }; writeNewsCache(cache); }
+      } catch { /* best effort */ }
     }
-    if (fomcDay) console.log("[News] ⚠️  FOMC day — PM session (18:00–20:00 UTC) disabled");
   } catch (err) {
     console.warn("[News] Calendar fetch failed:", err.message);
+    if (cached) {
+      applyCalendar(cached.events, `STALE cached (${new Date(cached.fetchedAt).toISOString().slice(0, 16)}Z; live fetch failed)`);
+      state._newsFetchedDate = todayKey;
+      return;
+    }
+    state._newsRetry = (state._newsRetry || 0) + 1;
+    if (state._newsRetry <= NEWS_RETRY_MIN.length) {
+      const m = NEWS_RETRY_MIN[state._newsRetry - 1];
+      console.warn(`[News] No saved calendar — retrying in ${m} min (${state._newsRetry}/${NEWS_RETRY_MIN.length})`);
+      setTimeout(() => refreshNewsFilter().catch(console.error), m * 60000);
+    } else if (!state._newsWarned) {
+      state._newsWarned = true;
+      console.warn("[News] ⚠️  Calendar unavailable — entries are NOT paused around news events today");
+      notify("News calendar unavailable", "Could not load today's economic calendar, so entries are NOT being paused around news events today.", "default").catch(() => {});
+    }
   }
 }
 
@@ -385,9 +619,18 @@ const NTFY_CHANNEL = (process.env.NTFY_CHANNEL || "").trim();
 async function notify(title, message, priority = "default") {
   if (!NTFY_CHANNEL) return;
   try {
+    // Multiple accounts commonly share one NTFY_CHANNEL (simpler than subscribing
+    // to N separate topics on a phone), and most notify() calls here — DLL hit,
+    // profit cap hit, order rejected, combine target reached, drawdown warning,
+    // hub reconnecting — bypass the orchestrator's per-account bundle/label system
+    // entirely (that only covers TRADE_ENTERED/CLOSED, TREND_FILTER, and the brief/
+    // summary events). Without this, two accounts with different configs (e.g. a
+    // $350 vs $4,500 profit cap) send visually identical pushes with no way to
+    // tell which account triggered which.
+    const label = process.env.ACCOUNT_LABEL ? `[${process.env.ACCOUNT_LABEL}] ` : "";
     await axios.post(`https://ntfy.sh/${NTFY_CHANNEL}`, message, {
       headers: {
-        Title:    title,
+        Title:    label + title,
         Priority: priority,   // min / low / default / high / urgent
         Tags:     "chart_with_upwards_trend",
       },
@@ -399,11 +642,49 @@ async function notify(title, message, priority = "default") {
 // When running under multi-account orchestrator, emit structured events instead of
 // sending ntfy directly — the orchestrator aggregates and sends one bundled notification.
 const IS_MULTI       = process.env.MULTI_ACCOUNT === "1";
+// Separate from IS_MULTI on purpose: the Electron app's main.js also sets
+// MULTI_ACCOUNT=1 for its own multi-account support, but it discards every
+// [BUNDLE] line outright and has no combined-notification replacement — so
+// gating the individual brief on IS_MULTI there would silently leave those
+// users with NO pre-session notification at all. Only multi-account.mjs (my
+// own launcher) actually consumes [BUNDLE] events and sends a combined one,
+// so only it sets this flag explicitly.
+const HAS_BUNDLE_CONSUMER = process.env.BUNDLE_CONSUMER === "1";
 // Stagger entry per account so all 4 combines don't hit the same tick simultaneously.
 // Combine-1 → 0ms, Combine-2 → 2500ms, Combine-3 → 5000ms, Combine-4 → 7500ms.
+// Prefer an explicit ACCOUNT_IDX from the launcher (main.js/multi-account.mjs pass
+// the account's real position in the config list). NEVER derive the index from
+// parsing ACCOUNT_LABEL's trailing digits as the primary path — TopstepX's own
+// auto-generated account names (e.g. "50KTC-V2-DLL-646004-94940643") end in a
+// large, unpredictable numeric ID, and parsing that out overflowed a 32-bit
+// setTimeout — which Node silently clamps to 1ms — silently disabling the
+// stagger protection entirely. The label-parsing fallback below only exists for
+// bare CLI usage with no launcher, and is hard-capped so it can never repeat that.
 const ACCOUNT_LABEL  = process.env.ACCOUNT_LABEL ?? "";
-const ACCOUNT_IDX    = Math.max(0, (parseInt(ACCOUNT_LABEL.replace(/\D/g, "")) || 1) - 1);
-const ENTRY_STAGGER_MS = ACCOUNT_IDX * 2500;
+const MAX_SANE_ACCOUNT_IDX = 20; // 20 accounts × 2.5s = 50s max stagger — generous but bounded
+let ACCOUNT_IDX;
+if (process.env.ACCOUNT_IDX !== undefined) {
+  ACCOUNT_IDX = Math.max(0, Math.min(MAX_SANE_ACCOUNT_IDX, parseInt(process.env.ACCOUNT_IDX) || 0));
+} else {
+  const parsedFallback = Math.max(0, (parseInt(ACCOUNT_LABEL.match(/(\d+)$/)?.[1] || "1") || 1) - 1);
+  if (parsedFallback > MAX_SANE_ACCOUNT_IDX) {
+    console.warn(`[Stagger] ⚠️  ACCOUNT_IDX not set and label "${ACCOUNT_LABEL}" parsed to an implausible index (${parsedFallback}) — clamping to 0. Pass ACCOUNT_IDX explicitly to fix properly.`);
+    ACCOUNT_IDX = 0;
+  } else {
+    ACCOUNT_IDX = parsedFallback;
+  }
+}
+// Artificial per-account delay before order submission — defaults to OFF.
+// Each account already independently checks its own DLL/profit-cap gates and
+// computes its own cushion-based size before this point, so removing the delay
+// doesn't touch risk management or scaling at all — it only affects how close
+// together in time two accounts' orders go out once each has independently
+// decided to trade the same signal. Multiple accounts trading the same signal
+// at nearly the same instant (natural network/processing latency only, no
+// artificial delay added) was an explicit choice — set STAGGER_MS_PER_ACCOUNT
+// to restore spacing if ever needed.
+const STAGGER_MS_PER_ACCOUNT = parseInt(process.env.STAGGER_MS_PER_ACCOUNT || "0");
+const ENTRY_STAGGER_MS = ACCOUNT_IDX * STAGGER_MS_PER_ACCOUNT;
 function emitBundleEvent(type, data) {
   if (IS_MULTI) process.stdout.write(`[BUNDLE] ${JSON.stringify({ type, ...data })}\n`);
 }
@@ -426,6 +707,186 @@ function logTrade(record) {
   }
 }
 
+function logBlockedSignal(sig, dir, blockedBy) {
+  try {
+    appendFileSync(BLOCKED_SIGNAL_LOG, JSON.stringify({
+      timestamp: new Date().toISOString(),
+      signal: sig.id, dir, price: sig.price,
+      blockedBy, // which direction's slot was already taken
+    }) + "\n");
+  } catch (e) {
+    console.warn("[Log] Failed to write blocked-signal log:", e.message);
+  }
+}
+
+// ─── Manual-trade stand-aside (opt-in: ALLOW_MANUAL_TRADES=1) ────────────────
+// The user sometimes trades by hand on this same account. With this on, an exchange position the
+// engine did NOT open is left alone by the watchdog, and new signals are skipped (with a phone
+// notification of the trade that would have fired) instead of netting against it / stacking size.
+const ALLOW_MANUAL_TRADES = process.env.ALLOW_MANUAL_TRADES === "1";
+const MANUAL_SKIP_LOG = join(LOGS_DIR, `manual-standaside-${SAFE_ACCOUNT_ID}.jsonl`);
+function manualPositionOpen() {
+  return ALLOW_MANUAL_TRADES &&
+    state.openPositionSize > 0 &&
+    state.activeDirections.size === 0 &&
+    ![...state.openTrades.values()].some(t => !t.isProtective);
+}
+// Authoritative check: the live hub position feed is unreliable on this account, so right before an entry
+// ask the exchange directly. Skipped when the engine already owns a position (that one is not "manual").
+// Fails open (returns null) on any API problem so a hiccup never blocks a real signal.
+async function untrackedExchangePosition() {
+  if (!ALLOW_MANUAL_TRADES) return null;
+  if ([...state.openTrades.values()].some(t => !t.isProtective)) return null;
+  try {
+    const d = await apiPost("/api/Position/searchOpen", { accountId: state.accountId });
+    if (!d.success) return null;
+    const p = (d.positions ?? []).find(x => (x.size ?? 0) !== 0);
+    return p ? { dir: p.type === 1 ? "long" : "short", size: Math.abs(p.size) } : null;
+  } catch { return null; }
+}
+function standAsideForManual(sig, dir, contracts, pos = null) {
+  const stopT = estimateStopTicks(sig, dir === "long");
+  const tpT   = sig.tpTicks ?? CFG.tpTicks;
+  console.log(`[Manual] ⏸ Skipping ${sig.id} ${dir.toUpperCase()} @ ${sig.price} — your manual ${(pos?.dir ?? state.openPositionDir)?.toUpperCase()} ${pos?.size ?? state.openPositionSize}ct is open`);
+  notify(
+    `⏸ Skipped ${sig.id} — you're in a trade`,
+    `${dir.toUpperCase()} signal @ ${sig.price} (stop ${stopT}t / TP ${tpT}t, ${contracts}ct) would have fired. Bot standing aside while your manual ${pos?.dir ?? state.openPositionDir} ${pos?.size ?? state.openPositionSize}ct is open.`,
+    "default"
+  ).catch(() => {});
+  try {
+    appendFileSync(MANUAL_SKIP_LOG, JSON.stringify({
+      timestamp: new Date().toISOString(), signal: sig.id, dir, price: sig.price, stopTicks: stopT, tpTicks: tpT,
+      contracts, manualDir: pos?.dir ?? state.openPositionDir, manualSize: pos?.size ?? state.openPositionSize,
+    }) + "\n");
+  } catch (e) { console.warn("[Log] Failed to write manual-standaside log:", e.message); }
+}
+if (ALLOW_MANUAL_TRADES) console.log("[Manual] Stand-aside mode ON — watchdog won't close your manual positions; bot skips signals while you're in one (phone notification instead)");
+
+// ─── SL post-mortem tracker ─────────────────────────────────────────────────
+// For every stop-out, keep watching subsequent bars (same session only, same
+// cutoff the live engine itself uses for EOD force-close) to see whether price
+// would have reached the ORIGINAL take-profit anyway — quantifies how much of
+// "losing" is really "direction right, stop too tight" vs "direction wrong",
+// and exactly how many ticks the stop would have needed to survive the
+// drawdown and still catch the TP. Works from REST order lookups only (not
+// in-memory trade state), so it's identical whether the close came through the
+// live SignalR path or the REST orphan-recovery path — on this account, most
+// trades go through the latter (see reconcileMissedTrades).
+function loadSlPostMortems() {
+  try { return JSON.parse(readFileSync(SL_POSTMORTEM_PATH, "utf8")); } catch { return []; }
+}
+function saveSlPostMortems(list) {
+  try { writeFileSync(SL_POSTMORTEM_PATH, JSON.stringify(list)); } catch {}
+}
+function logSlReview(record) {
+  try { appendFileSync(SL_REVIEW_LOG, JSON.stringify(record) + "\n"); } catch {}
+}
+
+async function startSlPostMortem(closingOrderId, exitPrice, contracts, fallbackSignalId) {
+  try {
+    const slOd = await apiPost("/api/Order/searchById", { accountId: state.accountId, orderId: closingOrderId });
+    const slOrder = slOd?.order ?? (slOd?.orders ?? slOd?.items ?? [])[0];
+    if (!slOrder) return;
+    const parentOrderId = slOrder.parentOrderId;
+    const isLong  = slOrder.side === 1; // closing side is opposite of position — Ask(1)=sell=was LONG
+    const slPrice = slOrder.stopPrice;
+
+    let entryPrice = null, tpPrice = null, signalId = fallbackSignalId ?? null;
+    if (parentOrderId != null) {
+      const since = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
+      const sibOd = await apiPost("/api/Order/search", { accountId: state.accountId, startTimestamp: since });
+      const orders = sibOd?.orders ?? sibOd?.items ?? [];
+      const entryOrder = orders.find(o => o.id === parentOrderId);
+      const tpOrder = orders.find(o => o.parentOrderId === parentOrderId && /-TP$/.test(o.customTag || ""));
+      if (entryOrder) {
+        entryPrice = entryOrder.filledPrice;
+        if (!signalId && entryOrder.customTag) signalId = entryOrder.customTag.replace(/_\d{10,}$/, '');
+      }
+      if (tpOrder) tpPrice = tpOrder.limitPrice;
+    }
+    if (entryPrice == null || tpPrice == null) {
+      console.warn(`[SLReview] Could not resolve entry/TP for closing order ${closingOrderId} — skipping post-mortem`);
+      return;
+    }
+
+    const list = loadSlPostMortems();
+    list.push({
+      closingOrderId,  // join key back to this trade's row in trades.jsonl (its exit order id)
+      signalId: signalId ?? "unknown", isLong, entryPrice, tpPrice, slPrice, exitPrice, contracts,
+      actualStopTicks: Math.round(Math.abs(exitPrice - entryPrice) / CFG.tickSize),
+      worstAdverseTicks: Math.round(Math.abs(exitPrice - entryPrice) / CFG.tickSize),
+      openedDate: new Date().toISOString().slice(0, 10),
+      startedAt: new Date().toISOString(),
+    });
+    saveSlPostMortems(list);
+    console.log(`[SLReview] 📋 Tracking post-mortem for ${signalId} ${isLong ? "LONG" : "SHORT"} — entry ${entryPrice}, TP ${tpPrice}, watching for reversal`);
+  } catch (e) {
+    console.warn(`[SLReview] Failed to start post-mortem: ${e.message}`);
+  }
+}
+
+// Called on every new 5-min bar close — updates MAE and resolves any pending
+// post-mortems whose window (same session) has hit TP or ended.
+//
+// Takes the FULL bars array and processes every bar newer than the last one
+// we've already checked — not just the single latest bar. The caller only
+// invokes this when its own tick lands inside the 10s window after a 5m
+// boundary; if a tick is ever skipped entirely (a hub reconnect, a slow
+// fetch, any delay that pushes past that window), the bar that closed during
+// the gap was previously never evaluated at all — state.bars.at(-1) only
+// shows whichever bar is newest *right now*, silently skipping whatever
+// closed in between. A 2026-09-30 trade's real worst excursion (42t, in a
+// bar that fell in exactly this kind of gap) was recorded as just 16t as a
+// result — a real accuracy bug, not a 5-minute-granularity limitation.
+let lastSlPostMortemBarTime = 0;
+function checkSlPostMortems(bars) {
+  const list = loadSlPostMortems();
+  if (list.length === 0) return;
+  const newBars = bars.filter(b => b.time > lastSlPostMortemBarTime).sort((a, b) => a.time - b.time);
+  if (newBars.length === 0) return;
+  lastSlPostMortemBarTime = newBars[newBars.length - 1].time;
+
+  let stillOpen = list;
+  for (const bar of newBars) {
+    const d  = new Date(bar.time * 1000);
+    const hm = d.getUTCHours() * 100 + d.getUTCMinutes();
+    const sessionOver = (hm >= 1500 && hm < 1800) || hm >= 2000;
+    const next = [];
+    for (const p of stillOpen) {
+      let resolved = false;
+      if (p.isLong) {
+        const adverseTicks = Math.round((p.entryPrice - bar.low) / CFG.tickSize);
+        if (adverseTicks > p.worstAdverseTicks) p.worstAdverseTicks = adverseTicks;
+        if (bar.high >= p.tpPrice) resolved = true;
+      } else {
+        const adverseTicks = Math.round((bar.high - p.entryPrice) / CFG.tickSize);
+        if (adverseTicks > p.worstAdverseTicks) p.worstAdverseTicks = adverseTicks;
+        if (bar.low <= p.tpPrice) resolved = true;
+      }
+      if (resolved) {
+        // Distinguish a genuinely actionable near-miss (stop only needed a little
+        // more room) from a wild outlier swing (needed way more room than any
+        // reasonable stop would risk) — the former is worth reviewing on the
+        // weekend, the latter is just noise from one extreme move.
+        const marginTicks = p.worstAdverseTicks - p.actualStopTicks;
+        const closeCall = marginTicks <= 10;
+        logSlReview({ ...p, resolution: "WOULD_HAVE_WON", ticksNeededToSurvive: p.worstAdverseTicks, marginTicks, closeCall, resolvedAt: new Date().toISOString() });
+        console.log(`[SLReview] ${closeCall ? "🟡 CLOSE CALL" : "✅"} ${p.signalId} WOULD have hit TP — needed ${p.worstAdverseTicks}t stop to survive (actual stop was ${p.actualStopTicks}t, margin +${marginTicks}t)${closeCall ? " — worth a look this weekend" : ""}`);
+        continue;
+      }
+      if (sessionOver) {
+        logSlReview({ ...p, resolution: "DIRECTION_WRONG", ticksNeededToSurvive: null, resolvedAt: new Date().toISOString() });
+        console.log(`[SLReview] ❌ ${p.signalId} never reached TP by session end — direction was wrong`);
+        continue;
+      }
+      next.push(p);
+    }
+    stillOpen = next;
+    if (stillOpen.length === 0) break;
+  }
+  saveSlPostMortems(stillOpen);
+}
+
 function logWeeklySummary(record) {
   try {
     appendFileSync(WEEKLY_LOG, JSON.stringify(record) + "\n");
@@ -440,7 +901,7 @@ function logWeeklySummary(record) {
 // NQ_BB_SQUEEZE_L/S are NQ-only signals from nq-strategies.js — must be in this list
 // or they bypass the ENABLED_STRATEGIES whitelist filter entirely.
 // V5 NQ signals (Portfolio V5, 2026-09-10 quant rebuild — see nq-strategies.js header for methodology)
-const ACTIVE_STRATEGIES = ["DONCH15_L","VOLBO_L","VOLBO_S","EMA21_PULL_L","BO10_S","3BAR_BEAR_S","KELT_L","NQ_OB_FADE_L","NQ_OB_FADE_S","NQ_AM_VWAP_FADE_L","NQ_AM_VWAP_FADE_S","NQ_ADR_FADE_L","NQ_ADR_FADE_S","NQ_14H_REV_S","NQ_FIRST30_FADE_L","NQ_FIRST30_FADE_S","NQ_PM_VWAP_FADE_L","NQ_OVERNIGHT_TRAP_S","NQ_TIGHT_VWAP_AM_L","NQ_TIGHT_VWAP_AM_S","NQ_HILOW_REJ_AM_L","NQ_HILOW_REJ_AM_S","NQ_MOM_EXHAUST_AM_L","NQ_MOM_EXHAUST_AM_S","NQ_PULLBACK_AM_L","NQ_PULLBACK_AM_S"];
+const ACTIVE_STRATEGIES = ["DONCH15_L","VOLBO_L","VOLBO_S","EMA21_PULL_L","BO10_S","3BAR_BEAR_S","KELT_L","NQ_OB_FADE_L","NQ_OB_FADE_S","NQ_AM_VWAP_FADE_L","NQ_AM_VWAP_FADE_S","NQ_ADR_FADE_L","NQ_ADR_FADE_S","NQ_14H_REV_S","NQ_FIRST30_FADE_L","NQ_FIRST30_FADE_S","NQ_PM_VWAP_FADE_L","NQ_PM_VWAP_FADE_S","NQ_OVERNIGHT_TRAP_S","NQ_TIGHT_VWAP_AM_L","NQ_TIGHT_VWAP_AM_S","NQ_HILOW_REJ_AM_L","NQ_HILOW_REJ_AM_S","NQ_MOM_EXHAUST_AM_L","NQ_MOM_EXHAUST_AM_S","NQ_PULLBACK_AM_L","NQ_PULLBACK_AM_S"];
 function buildUserDisabledStrategies() {
   const env = process.env.ENABLED_STRATEGIES;
   if (!env) return [];
@@ -455,7 +916,23 @@ const CFG = {
   accountId:      process.env.ACCOUNT_ID    ? parseInt(process.env.ACCOUNT_ID) : null,
   contractSearch: process.env.SYMBOL        || "ES",
   maxContracts:   parseInt(process.env.MAX_CONTRACTS || "2"),  // overridable per account via env
+  // AUTO_SCALING=0 disables cushion-based sizing — trades a fixed maxContracts every time
+  // (still hard-capped at the account's real contract limit by TopstepX itself).
+  autoScaling:    process.env.AUTO_SCALING !== "0",
   stopTicks:      parseInt(process.env.STOP_LOSS_TICKS   || "10"),
+  // Every trade uses exactly this many ticks from fill regardless of the
+  // signal's own stopTicks or the bar-anchored barHigh/barLow calc. Defaults
+  // to 10 (not null) as of 2026-10-03 — this used to default to null, silently
+  // falling back to the old fully variable bar-anchored model (which hit
+  // 112-339t on 2026-09-25, and separately caused a user's config missing
+  // this env var to see 191-308t stops and zero trades, since every signal
+  // then got filtered by maxStopTicks). An extensive backtest campaign
+  // confirmed fixed-10t beats every alternative by a wide margin — that
+  // decision should hold by default, not only when a user happens to set
+  // this var correctly. Set FORCE_FIXED_STOP_TICKS to a different value to
+  // override, or explicitly to the string "off" to opt back into the
+  // bar-anchored model (not recommended).
+  forceFixedStopTicks: process.env.FORCE_FIXED_STOP_TICKS === "off" ? null : parseInt(process.env.FORCE_FIXED_STOP_TICKS || "10"),
   maxStopTicks:   parseInt(process.env.MAX_STOP_TICKS    || "25"),  // skip trade if bar range would push SL > this many ticks from fill
   trailTicks:     parseInt(process.env.TRAIL_TICKS       || "8"),
   tpTicks:        parseInt(process.env.TAKE_PROFIT_TICKS || "48"),
@@ -469,7 +946,22 @@ const CFG = {
   accountBase:     parseFloat(process.env.ACCOUNT_BASE    || "100000"),   // starting balance — 50K or 100K combine
   combineBalance:  parseFloat(process.env.ACCOUNT_BASE || "100000") + parseFloat(process.env.COMBINE_TARGET || "6000"),
   trailDD:         parseFloat(process.env.TRAIL_DD        || "2500"),     // TopstepX trailing DD limit (EOD, not intraday)
+  // Extra delay (ms) before a shared-API-key account's FIRST reconnect attempt after
+  // being kicked by another account logging in. 0 (default) = reconnect immediately,
+  // same as before. Set on the lower-priority account only — see the hub onclose handler.
+  reconnectPriorityDelayMs: parseInt(process.env.RECONNECT_PRIORITY_DELAY_MS || "0"),
   trailDDWarn:     2000,   // warn at $2,000 drawdown (buffer from $2,500 trailing EOD DD)
+  // Dollar cushion required per contract step in the combine ladder (Layer 0a).
+  // Default 400 matches the original 100K calibration; larger accounts with a
+  // proportionally larger trailDD should widen this so the ladder steps stay
+  // conservative relative to account size.
+  cushionStepDollars: parseFloat(process.env.CUSHION_STEP_DOLLARS || "400"),
+  // Risk-based sizing cap — complements the bar-anchored stop model, where stop
+  // distance (and therefore $ risk per contract) varies trade to trade instead
+  // of being fixed. The cushion ladder alone doesn't know how wide THIS trade's
+  // stop is; this caps contracts so no single trade risks more than this many
+  // dollars, regardless of how much cushion would otherwise allow. 0 = disabled.
+  targetRiskDollars: parseFloat(process.env.TARGET_RISK_DOLLARS || "0"),
   tickSize:       0.25,
   tickValue:      12.50,
 
@@ -559,6 +1051,31 @@ const CFG = {
   atrMinFilter:       parseFloat(process.env.ATR_MIN_FILTER       || "2.0"),
   fundedStartBalance: parseInt(process.env.FUNDED_START_BALANCE  || "-1"),  // >= 0 enables cushion scaling; -1 = disabled
 
+  // Real TopstepX Express Funded scaling plan (confirmed from the account's own
+  // Risk Settings page, not a convention we made up like the old $2K-step ladder).
+  // Format: "threshold:contracts,threshold:contracts,..." ascending by threshold.
+  // FUNDED_SCALE_BASE is the floor below the first threshold.
+  // Mon/Fri edge-day cap (1ct regardless of cushion) is a personal risk preference,
+  // not a default for every commercial customer's funded account — opt-in only.
+  scaleEdgeDayCap:  process.env.SCALE_EDGE_DAY_CAP === "1",
+  // Cap SIZE on Mon/Fri — default 1ct; raised to 2ct here 2026-10-06 after the AM/PM
+  // window-widening backtest showed Mon/Fri's win rate held up (OOS 42%/44%) with
+  // acceptable worst-day risk at higher size. Revisit after a few live weeks.
+  scaleEdgeDayCapContracts: parseInt(process.env.SCALE_EDGE_DAY_CAP_CONTRACTS || "1"),
+  scaleEdgeDayCapAll:       process.env.SCALE_EDGE_DAY_CAP_ALL === "1",   // also cap Combine accounts (default: funded only)
+  fundedScaleBase:  parseInt(process.env.FUNDED_SCALE_BASE || "0"),  // 0 = table not active for this account
+  fundedScaleTiers: (process.env.FUNDED_SCALE_TIERS || "")
+    .split(",").filter(Boolean)
+    .map(s => { const [t, c] = s.split(":"); return [parseFloat(t), parseInt(c)]; })
+    .sort((a, b) => a[0] - b[0]),
+  // Below the first real tier threshold, ramp 1 contract per this many $ instead
+  // of jumping straight to fundedScaleBase — smoother sizing on the way up.
+  fundedScaleBaseStep: parseInt(process.env.FUNDED_SCALE_BASE_STEP || "0"),  // 0 = jump straight to base (old behavior)
+  // Above the LAST tier's threshold, ramp 1 contract per this many $ (starting
+  // from the second-to-last tier's count) instead of jumping straight to the
+  // last tier's count — that count is treated as the real ceiling, not a jump target.
+  fundedScalePostStep: parseInt(process.env.FUNDED_SCALE_POST_STEP || "0"),  // 0 = jump straight to ceiling (old behavior)
+
   // ── Trend-day direction filters ──────────────────────────────────────────────
   // Measure the AM session's first-30-min move (open of 13:45 bar → close of 14:15 bar).
   // If the move exceeds a threshold, suppress the losing direction for the AM remainder ONLY.
@@ -605,7 +1122,10 @@ const CFG_FUNDED = {
   dailyLossLimit: process.env.DAILY_LOSS_LIMIT ? parseInt(process.env.DAILY_LOSS_LIMIT) : 900,
   // Topstep 50K funded daily loss limit = $1,000. Engine halts at $900 to leave $100 buffer.
   // accounts.json sets DAILY_LOSS_LIMIT=900 explicitly; this fallback ensures it's never inherited from combine default ($1,400).
-  dailyProfitCap: 2500,   // no consistency rule on funded — lock in big days at $2,500
+  // No consistency rule on funded, and the incremental profit-lock staircase
+  // already banks gains as a trade runs (see checkProfitLockLadder) — so there's
+  // no need to hard-cap and force-close the day at a fixed dollar number anymore.
+  dailyProfitCap: Infinity,
 };
 
 // ─── 15m Layer Config ─────────────────────────────────────────────────────────
@@ -657,12 +1177,14 @@ const state = {
   haltedToday:             false,
   profitCappedToday:       false,
   briefSentToday:          false,
+  earlyHealthCheckDone:    false,  // true once the 13:10 UTC pre-open connectivity check has run today
   runnerClosePending:      false,  // true once runner-close market order has been sent (dedup guard)
   combineTargetNotified:   false,  // true once combine target push notification has fired
   balance:            null,   // live account balance (updated on every account event)
   startOfDayBalance:  null,   // balance at 13:30 UTC reset — used for API reconciliation
   dayContextRecovered: false, // true after reconcileMissedTrades restores mid-day dayPnL
   peakBalance:        null,
+  eodPeakBalance:     null,  // see loadEodPeakBalance() — the real trailing-DD floor basis
   openPositionSize:   0,      // current open position size (updated by onPositionEvent)
   openPositionDir:    null,   // "long" | "short" | null
 
@@ -684,6 +1206,7 @@ const state = {
   gapUpDay:           false,  // true when today's AM open > prior session close by >1pt — PM blocked
 
   hub:                null,
+  hubReconnecting:    false,  // guards against onclose firing re-entrantly on our own stop() calls
 };
 
 // ─── REST helpers ─────────────────────────────────────────────────────────────
@@ -691,8 +1214,52 @@ async function apiPost(path, body = {}) {
   const headers = state.token
     ? { Authorization: `Bearer ${state.token}` }
     : {};
-  const res = await axios.post(`${REST_BASE}${path}`, body, { headers });
-  return res.data;
+  try {
+    const res = await axios.post(`${REST_BASE}${path}`, body, { headers });
+    return res.data;
+  } catch (err) {
+    // A 401 here means the token went stale OUTSIDE the normal 22h scheduled
+    // refresh (found 2026-10-07: bars silently stopped updating for ~2 hours —
+    // every fetchBars/ESBars/watchdog call 401'd with no recovery short of a
+    // manual restart, since nothing previously re-authenticated off of this).
+    if (err.response?.status === 401 && path !== "/api/Auth/loginKey") maybeReauth();
+    throw err;
+  }
+}
+
+// ── Yield the TopstepX login when idle ──────────────────────────────────────────
+// TopstepX allows one live session per login. When the user opens the TopstepX web platform, the bot's session is ended
+// (GatewayLogout) and the bot used to take it straight back, which ends the user's web session, which makes them log in
+// again... a loop that logged the user out about once a minute. With YIELD_SESSION=1 the bot does NOT reclaim the login
+// (neither the hub reconnect nor the 401 re-auth) while it is flat and outside the windows it actually trades; it takes the
+// login back shortly before the next window. Inside the windows, or with any engine-owned position/order, nothing changes.
+const YIELD_SESSION = process.env.YIELD_SESSION === "1";
+function sessionNeeded(now = new Date()) {
+  const dow = now.getUTCDay(); if (dow === 0 || dow === 6) return false;
+  const hm = now.getUTCHours() * 100 + now.getUTCMinutes();
+  return (hm >= 1250 && hm < 1535) || (hm >= 1725 && hm < 2035);   // AM and PM windows (incl. Mon/Fri widening) + margin
+}
+const engineIsFlat = () => state.openPositionSize === 0 && state.activeDirections.size === 0 && state.openTrades.size === 0 && !state.pendingRetry;
+function shouldYieldSession(now = new Date()) { return YIELD_SESSION && !sessionNeeded(now) && engineIsFlat(); }
+function enterSessionYield(why) {
+  if (state.sessionYielded) return;
+  state.sessionYielded = true;
+  console.warn(`[Session] ⏸ ${why} — bot is idle, so it is NOT taking the TopstepX login back until shortly before the next trading window`);
+  notify("Bot yielding TopstepX login", "Another login (probably you on the TopstepX web platform) took the session while the bot is idle. The bot will take it back shortly before the next trading window.", "low").catch(() => {});
+}
+
+let _reauthInFlight = null;
+let _lastReauthAttempt = 0;
+function maybeReauth() {
+  if (shouldYieldSession()) { enterSessionYield("Got 401 (session ended elsewhere)"); return; }
+  const now = Date.now();
+  if (_reauthInFlight || now - _lastReauthAttempt < 30_000) return;  // debounce a 401 burst to one attempt
+  _lastReauthAttempt = now;
+  console.warn("[Auth] ⚠️  Got 401 outside scheduled refresh — re-authenticating now");
+  _reauthInFlight = login()
+    .then(() => console.log("[Auth] ✓ Re-authenticated after 401"))
+    .catch(e => console.error(`[Auth] ✗ Re-auth after 401 failed: ${e.message}`))
+    .finally(() => { _reauthInFlight = null; });
 }
 
 // ─── Authentication ───────────────────────────────────────────────────────────
@@ -705,8 +1272,25 @@ async function login() {
   state.token = data.token;
   console.log("[Auth] ✓ Logged in");
 
-  // Re-auth 90 minutes before token likely expires (tokens typically last 24h)
-  setTimeout(login, 22 * 60 * 60 * 1000);
+  scheduleTokenRefresh(22 * 60 * 60 * 1000);
+}
+
+// The scheduled refresh call itself can fail (transient network error, rate
+// limit) — if it does and nothing catches it, the next refresh never gets
+// scheduled (that only happens from inside a successful login() above), so
+// the token silently goes stale forever and every REST call starts 401ing
+// with no recovery short of a full process restart or a lucky hub disconnect
+// that happens to trigger its own separate re-login. Retry on a short backoff
+// instead of giving up silently.
+function scheduleTokenRefresh(delay) {
+  setTimeout(async () => {
+    try {
+      await login();
+    } catch (e) {
+      console.error(`[Auth] ⚠️  Scheduled token refresh failed: ${e.message} — retrying in 5 min`);
+      scheduleTokenRefresh(5 * 60 * 1000);
+    }
+  }, delay);
 }
 
 // ─── Account resolution ───────────────────────────────────────────────────────
@@ -724,7 +1308,23 @@ async function resolveAccount() {
   if (!acct) throw new Error("No tradeable account found");
 
   state.accountId   = acct.id;
-  state.peakBalance = acct.balance;
+  // Populate immediately from this REST snapshot — otherwise state.balance stays
+  // null until the first async SignalR account push arrives, which can take a
+  // while after a restart. A signal firing in that gap fell through the
+  // contract-sizing null-guards to an unsafe default (CFG.maxContracts) instead
+  // of a conservative one — root cause of an 8ct entry that should've been 2ct.
+  state.balance     = +acct.balance;
+  const persistedPeak = loadPeakBalance();
+  state.peakBalance = persistedPeak != null ? Math.max(persistedPeak, acct.balance) : acct.balance;
+  savePeakBalance(state.peakBalance);
+  // Deliberately NOT Math.max'd against the live acct.balance here — on a mid-day
+  // restart, current balance already includes today's in-progress trades, and
+  // folding that in would reintroduce the exact bug this is fixing. Only the daily
+  // session-reset point (which fires before today's first trade) is allowed to
+  // advance this. First-ever-run bootstrap: no better data exists yet, so start
+  // from current balance same as peakBalance above.
+  const persistedEodPeak = loadEodPeakBalance();
+  state.eodPeakBalance = persistedEodPeak != null ? persistedEodPeak : acct.balance;
   state.simulated   = acct.simulated ?? true;
   state.tickValue   = CFG.tickValue;
 
@@ -732,10 +1332,14 @@ async function resolveAccount() {
   // TopstepX Express Funded accounts stay simulated:true in the API even when funded.
   // Detect funded state by: simulated:false OR account name starts with "EXPRESS".
   const isFunded = !state.simulated || /^EXPRESS/i.test(acct.name ?? "");
+  state.isFunded = isFunded;  // stored so every other funded-only code path (contract
+                              // scaling, edge-day cap) uses the same detection — a raw
+                              // !state.simulated check misses Express Funded accounts,
+                              // which report simulated:true even when genuinely funded.
   if (isFunded) {
     Object.assign(CFG, CFG_FUNDED);
     console.log(`[Account] 🎉 FUNDED ACCOUNT detected — applying funded settings:`);
-    console.log(`[Account]    maxContracts=${CFG.maxContracts}ct | dailyProfitCap=$${CFG.dailyProfitCap}`);
+    console.log(`[Account]    maxContracts=${CFG.maxContracts}ct | dailyProfitCap=${Number.isFinite(CFG.dailyProfitCap) ? `$${CFG.dailyProfitCap}` : "none (profit-lock ladder only)"}`);
   }
 
   const mode = isFunded ? "⭐ FUNDED" : "Combine";
@@ -772,6 +1376,15 @@ async function fetchBars(limit = 300, partial = false, lookbackHours = 48) {
   const now   = new Date();
   const start = new Date(now - lookbackHours * 60 * 60 * 1000); // default 48h; boot uses 720h (30 days)
 
+  // NOTE: tried live:true here on 2026-10-08 (theory: TopstepX's live-money feed
+  // might be fresher than the delayed/simulated one) — it outright fails for this
+  // account (errorCode:1, no bars; Contract/search with live:true also returns zero
+  // contracts), so this account has no live-data entitlement. live:false is the only
+  // working option, confirmed. Investigating 2026-10-05's ~1-bar-stale signal price
+  // (entry fired using a bar that was already one 5m bucket old) pointed at TopstepX's
+  // API itself serving a stale bar that moment, not our request params — see the
+  // staleness check right after this call, added to catch it with hard evidence if
+  // it recurs instead of reconstructing it after the fact.
   const data = await apiPost("/api/History/retrieveBars", {
     contractId:       state.contractId,
     live:             !state.simulated,
@@ -803,6 +1416,24 @@ async function fetchBars(limit = 300, partial = false, lookbackHours = 48) {
   const latest = state.bars.at(-1);
   const latestStr = latest ? new Date(latest.time * 1000).toISOString() : "none (market closed/weekend)";
   console.log(`[Bars] ${state.bars.length} bars loaded (latest: ${latestStr})`);
+
+  // Staleness check — found 2026-10-05: a signal fired using a bar that was already
+  // one full 5m bucket old (TopstepX served it that way, not a bug in our request —
+  // see note above fetchBars's apiPost call). Bars are start-time labeled, so a bar
+  // closes 5 min after its own `time`. Only checked during the two trading sessions
+  // (outside that, an old "latest" bar can just mean genuinely no new volume, not staleness)
+  // and only on confirmed-closed fetches, not partial-bar ones.
+  if (!partial && latest) {
+    const nowHM = now.getUTCHours() * 100 + now.getUTCMinutes();
+    const inSession = (nowHM >= 1330 && nowHM < 1500) || (nowHM >= 1800 && nowHM < 2000);
+    if (inSession) {
+      const barClosedAt = latest.time * 1000 + 5 * 60 * 1000;
+      const staleMs = now.getTime() - barClosedAt;
+      if (staleMs > 2 * 60 * 1000) {
+        console.warn(`[Bars] ⚠️  STALE — latest bar (${latestStr}) closed ${Math.round(staleMs / 60000)}min ago but we're evaluating on it now. TopstepX likely served a stale bar.`);
+      }
+    }
+  }
 
   // Bar stream log — write each confirmed-closed bar once for live vs backtest comparison
   // Guard checks in-memory state AND the last line of the file to survive engine restarts
@@ -905,6 +1536,78 @@ async function fetchESBars() {
 }
 
 // ─── SignalR Hub ──────────────────────────────────────────────────────────────
+// Tear down the current hub connection properly before replacing it. Just
+// setting state.hub = null leaves the old connection object alive in the
+// background — its own automatic-reconnect timers and onclose handler keep
+// running against a connection nothing references anymore, and when it
+// eventually closes on its own, that orphaned onclose handler fires a SECOND,
+// colliding reconnect attempt (throws "Invocation canceled due to the
+// underlying connection being closed" and can even null out the NEW
+// connection from under it). Root cause of a customer's Friday outage where
+// the hub never recovered from the 13:10 UTC health check.
+async function stopHubSafely() {
+  if (!state.hub) return;
+  try { await state.hub.stop(); } catch { /* already closed/closing — fine */ }
+  state.hub = null;
+}
+
+// Shared full-reconnect flow — re-login, rebuild the hub connection, re-subscribe,
+// and reconcile any trades that closed while disconnected. Used both when SignalR
+// gives up on its own retries (onclose) and when the server force-kicks the
+// session (GatewayLogout) — both leave the engine with no live events until a
+// fresh login + connection replaces the dead one.
+async function triggerFullReconnect(reason) {
+  // stop() always fires onclose as part of its own teardown — so every one of our
+  // OWN stopHubSafely() calls (from this loop, or from the two health checks)
+  // re-invokes this same handler re-entrantly on the dying connection. Without this
+  // guard that spawns a second, concurrent reconnect loop every single time, which
+  // is the actual source of the repeating "Invocation canceled due to the underlying
+  // connection being closed" cascades — not a fresh bug, a re-entrancy gap in the
+  // original stopHubSafely() fix.
+  if (state.hubReconnecting) return;
+  if (shouldYieldSession()) { enterSessionYield(`Hub down${reason ? ` (${reason})` : ""}`); return; }
+  state.hubReconnecting = true;
+  console.warn(`[Hub] ⚠️  Connection down${reason ? ` (${reason})` : ''} — reconnecting...`);
+  notify("⚠️ Hub reconnecting", "SignalR connection lost — reconnecting in 30s. No events until restored.", "high").catch(() => {});
+  let attempt = 0;
+  try {
+    while (true) {
+      attempt++;
+      // Accounts sharing one TV_API_KEY fight over a single TopstepX session —
+      // whichever logs in last invalidates the other's hub. RECONNECT_PRIORITY_DELAY_MS
+      // lets a lower-priority account (e.g. a combine, vs. a funded account with real
+      // money on the line) wait longer before trying to reclaim the shared session,
+      // so the primary account holds it instead of both racing to re-login and
+      // re-kicking each other every time either one reconnects.
+      const priorityDelay = attempt === 1 ? (CFG.reconnectPriorityDelayMs || 0) : 0;
+      const delay = Math.min(30_000 * attempt, 300_000) + priorityDelay; // 30s, 60s, 90s … cap at 5min
+      await new Promise(r => setTimeout(r, delay));
+      try {
+        await login();
+        await stopHubSafely();
+        await connectHub();
+        console.log("[Hub] ✅ Full reconnect successful");
+        notify("✅ Hub reconnected", "SignalR connection restored.", "default").catch(() => {});
+        await reconcileMissedTrades();
+        return;
+      } catch (e) {
+        console.error(`[Hub] Reconnect attempt ${attempt} failed: ${e.message} — retrying in ${Math.min(30 * (attempt + 1), 300)}s`);
+      }
+    }
+  } finally {
+    state.hubReconnecting = false;
+  }
+}
+
+// The recurring "WebSocket closed with status code: 1006" disconnects (investigated
+// 2026-10-12) are NOT infra flakiness on our end -- they cluster overwhelmingly at
+// 21:00 UTC (16:00 CT), a standard daily futures settlement/EOD cutover time: 139 of
+// ~198 occurrences in the error log sit in that one hour, another 20 right at the
+// 20:00 UTC PM session close. This is TopstepX recycling gateway connections on their
+// own schedule. The automatic reconnect + full relogin + reconcileMissedTrades() below
+// already recovers from it every time; nothing to "fix" here beyond making sure that
+// recovery path stays solid (see the awaited notify() fix in reconcileMissedTrades,
+// which closed the one real gap this daily blip was causing).
 async function connectHub() {
   state.hub = new HubConnectionBuilder()
     .withUrl(USER_HUB, {
@@ -923,7 +1626,17 @@ async function connectHub() {
   state.hub.on("GatewayUserTrade",    onTradeEvent);
   state.hub.on("GatewayUserPosition", onPositionEvent);
   state.hub.on("GatewayUserAccount",  onAccountEvent);
-  state.hub.on("GatewayLogout",       () => console.log("[Hub] Server sent GatewayLogout — session ended by TopstepX"));
+  // Server-initiated session kick — found 2026-10-08: this previously only logged
+  // a message and did nothing, leaving the hub "connected" at the transport level
+  // but receiving zero further events (no bars, no fills, no account pushes) until
+  // someone noticed and manually restarted. Most likely cause per the comment below
+  // (another login with the same credentials, e.g. a diagnostic script run against
+  // the live account's API key) — but regardless of cause, treat it exactly like a
+  // permanently-closed connection and run the same full reconnect.
+  state.hub.on("GatewayLogout", () => {
+    console.warn("[Hub] ⚠️  Server sent GatewayLogout — session ended by TopstepX, triggering full reconnect");
+    triggerFullReconnect("GatewayLogout");
+  });
 
   state.hub.onreconnected(() => {
     console.log("[Hub] Reconnected — re-subscribing");
@@ -935,27 +1648,7 @@ async function connectHub() {
   // Without this handler the hub sits permanently dead — the engine keeps running
   // but receives zero events. Re-login and reconnect from scratch so the engine
   // stays live without needing a full process restart.
-  state.hub.onclose(async (err) => {
-    console.warn(`[Hub] ⚠️  Connection permanently closed${err ? `: ${err.message}` : ''} — reconnecting...`);
-    notify("⚠️ Hub reconnecting", "SignalR connection lost — reconnecting in 30s. No events until restored.", "high").catch(() => {});
-    let attempt = 0;
-    while (true) {
-      attempt++;
-      const delay = Math.min(30_000 * attempt, 300_000); // 30s, 60s, 90s … cap at 5min
-      await new Promise(r => setTimeout(r, delay));
-      try {
-        await login();
-        state.hub = null;
-        await connectHub();
-        console.log("[Hub] ✅ Full reconnect successful");
-        notify("✅ Hub reconnected", "SignalR connection restored.", "default").catch(() => {});
-        await reconcileMissedTrades();
-        return;
-      } catch (e) {
-        console.error(`[Hub] Reconnect attempt ${attempt} failed: ${e.message} — retrying in ${Math.min(30 * (attempt + 1), 300)}s`);
-      }
-    }
-  });
+  state.hub.onclose((err) => triggerFullReconnect(err ? err.message : null));
 
   await state.hub.start();
   console.log("[Hub] ✓ Connected");
@@ -1110,6 +1803,13 @@ function onTradeEvent(trade) {
   const resolvedIsLong = knownTrade?.isLong ?? trade.isLong ?? null;
   const dirLabel       = resolvedIsLong === true ? "LONG" : resolvedIsLong === false ? "SHORT" : "?";
 
+  if (knownTrade?.orderKind === "SL") {
+    const exitPx = trade.exitPrice ?? trade.price ?? null;
+    if (exitPx != null) {
+      startSlPostMortem(closingOrderId, exitPx, knownTrade.contracts ?? 1, resolvedSignal).catch(() => {});
+    }
+  }
+
   // Clean up openTrades for the order that just fired and its bracket partner
   if (knownTrade) {
     state.openTrades.delete(closingOrderId);
@@ -1150,6 +1850,22 @@ function onTradeEvent(trade) {
     console.log(`[Slip] ${resolvedSignal} ${dirLabel} — sig:${sigPrice?.toFixed(2)} fill:${entryFill?.toFixed(2)} → ${slipLabel}`);
   }
 
+  // Exit slippage: how far the actual SL/TP fill landed from the price we asked
+  // for. Positive = worse than intended (slipped through the stop / filled short
+  // of the limit); needed to know real execution cost before tightening the stop
+  // further than 10t. Both SL and TP closes for a LONG are sells (lower fill =
+  // worse) and for a SHORT are buys (higher fill = worse) — same formula either way.
+  const exitFill    = trade.exitPrice ?? trade.price ?? null;
+  const intendedPx  = knownTrade?.intendedPrice ?? null;
+  const orderKind   = knownTrade?.orderKind ?? null;
+  const exitSlipT   = (intendedPx != null && exitFill != null && resolvedIsLong !== null)
+    ? Math.round((resolvedIsLong ? intendedPx - exitFill : exitFill - intendedPx) / CFG.tickSize)
+    : null;
+  if (exitSlipT !== null && resolvedSignal !== "RECOVERED") {
+    const exitSlipLabel = exitSlipT === 0 ? "exact" : exitSlipT > 0 ? `+${exitSlipT}t adverse` : `${exitSlipT}t favorable`;
+    console.log(`[Slip] ${resolvedSignal} ${dirLabel} ${orderKind} exit — intended:${intendedPx?.toFixed(2)} fill:${exitFill?.toFixed(2)} → ${exitSlipLabel}`);
+  }
+
   logTrade({
     timestamp:      now.toISOString(),
     date:           now.toISOString().slice(0, 10),
@@ -1163,7 +1879,10 @@ function onTradeEvent(trade) {
     signal_price:   sigPrice,
     entry_price:    entryFill,
     entry_slip_ticks: entrySlipT,
-    exit_price:     trade.exitPrice   ?? trade.price ?? null,
+    exit_price:     exitFill,
+    exit_order_kind: orderKind,
+    exit_intended_price: intendedPx,
+    exit_slip_ticks: exitSlipT,
     gross_pnl:      +pnl.toFixed(2),
     balance_after:  state.balance     != null ? +state.balance.toFixed(2)     : null,
     peak_balance:   state.peakBalance != null ? +state.peakBalance.toFixed(2) : null,
@@ -1414,13 +2133,97 @@ function onPositionEvent(pos) {
   }
 }
 
+// ─── Incremental profit-lock staircase ─────────────────────────────────────────
+// As an open trade's price runs a % of the way to ITS OWN take-profit target, move
+// the stop (via the atomic /api/Order/modify — no cancel/replace gap, so the
+// position is never briefly unprotected) to lock in a smaller % of that same TP
+// distance, leaving a fixed give-back cushion. Expressed as a fraction of each
+// trade's own tpTicks (not a flat dollar amount or flat tick count) so the ladder
+// scales correctly on its own with both contract count (more contracts just means
+// more $ per tick — the tick math is contract-count-agnostic) and with strategy
+// (each strategy has its own tpTicks, e.g. 28-48t, so "50% to TP" means something
+// different in ticks per strategy but the same thing in risk/reward terms).
+// The trade's own TP (100%) or the full daily cap handles anything beyond this.
+const PROFIT_LOCK_STEPS = [
+  { atProgress: 0.50, lockAt: 0.35 },  // halfway to TP → lock 35% of TP distance
+  { atProgress: 0.75, lockAt: 0.60 },  // 3/4 to TP     → lock 60% of TP distance
+];
+
+async function checkProfitLockLadder(bal) {
+  if (!state.openPositionDir || state.openPositionSize === 0) return;
+  if (state.startOfDayBalance == null) return;
+
+  const entryTrade = [...state.openTrades.values()].find(t => !t.isProtective && t.slId && t.entryFillPrice != null);
+  if (!entryTrade || !entryTrade.tpTicks) return;
+
+  const totalDayPnL     = bal - state.startOfDayBalance;
+  const tradeUnrealized = totalDayPnL - (entryTrade.dayPnLAtOpen ?? 0);
+  // Ticks moved in this trade's favor — dollars-per-tick and contracts cancel out
+  // of tradeUnrealized / (contracts * tickValue), so this is just the price move,
+  // independent of how many contracts are on.
+  const ticksInFavor = tradeUnrealized / (entryTrade.contracts * state.tickValue);
+  const progress     = ticksInFavor / entryTrade.tpTicks;
+  const currentLevel  = entryTrade.profitLockLevel ?? 0;
+
+  for (let i = currentLevel; i < PROFIT_LOCK_STEPS.length; i++) {
+    const { atProgress, lockAt } = PROFIT_LOCK_STEPS[i];
+    if (progress < atProgress) break; // steps are ascending — not there yet
+    const level = i + 1;
+
+    const lockTicks = Math.round(lockAt * entryTrade.tpTicks);
+    const newStopPrice = entryTrade.isLong
+      ? entryTrade.entryFillPrice + lockTicks * CFG.tickSize
+      : entryTrade.entryFillPrice - lockTicks * CFG.tickSize;
+    const lockDollars = Math.round(lockTicks * entryTrade.contracts * state.tickValue);
+
+    console.log(`[ProfitLock] 🔒 ${entryTrade.signalId} — ${(progress*100).toFixed(0)}% to TP (${ticksInFavor.toFixed(1)}t/${entryTrade.tpTicks}t), moving stop to lock ${lockTicks}t (~$${lockDollars}) @ ${newStopPrice.toFixed(2)}`);
+
+    let modified = false;
+    let lastErr = null;
+    for (let attempt = 1; attempt <= 3 && !modified; attempt++) {
+      const res = await apiPost("/api/Order/modify", {
+        accountId: state.accountId,
+        orderId:   entryTrade.slId,
+        stopPrice: newStopPrice,
+      }).catch(e => ({ success: false, errorMessage: e.message }));
+      if (res.success) {
+        modified = true;
+      } else {
+        lastErr = res.errorMessage;
+        if (attempt < 3) await new Promise(r => setTimeout(r, 500));
+      }
+    }
+
+    if (modified) {
+      entryTrade.profitLockLevel = level;
+      console.log(`[ProfitLock] ✅ Stop moved — locking ${lockTicks}t (~$${lockDollars}) on ${entryTrade.signalId}`);
+      notify(`🔒 Profit locked ~$${lockDollars}`, `${entryTrade.signalId} ${entryTrade.isLong ? "LONG" : "SHORT"}\n${(progress*100).toFixed(0)}% to TP — stop moved to secure the gain`, "default").catch(() => {});
+    } else {
+      // Modify is atomic (no cancel-then-place), so the ORIGINAL stop is still
+      // live and the position is still protected — safe to just retry on the
+      // next poll (~5s) rather than force-close over a transient failure.
+      console.warn(`[ProfitLock] ⚠️  Failed to move stop after 3 attempts (${lastErr}) — original stop still in place, will retry next check`);
+    }
+    break; // one level per call — re-check picks up further levels on the next poll
+  }
+}
+
 // ─── Event: Account (balance update) ─────────────────────────────────────────
 function onAccountEvent(acct) {
   if (!acct || acct.balance == null) return;
   const bal = +acct.balance;
   state.balance = bal;
+  // Dedicated, always-fires-on-change balance line for consumers that parse stdout
+  // (the product's main.js) — the only other place "balance=$X" was ever logged was
+  // the one-time boot banner, so the UI's account total never updated again after
+  // that, including after every trade closing. Dedup on value so a burst of
+  // identical pushes doesn't spam the log.
+  if (state._lastLoggedBalance !== bal) {
+    state._lastLoggedBalance = bal;
+    console.log(`[Balance] current=$${bal.toFixed(2)}`);
+  }
   if (state.peakBalance === null) state.peakBalance = bal;
-  if (bal > state.peakBalance) state.peakBalance = bal;
+  if (bal > state.peakBalance) { state.peakBalance = bal; savePeakBalance(state.peakBalance); }
   // Lazy-fill startOfDayBalance only before the session opens — after 13:30 a mid-day
   // restart must use reconcileMissedTrades() to infer the true start balance from today's
   // closed trades, not the current balance (which already includes today's P&L).
@@ -1432,11 +2235,16 @@ function onAccountEvent(acct) {
       console.log(`[Account] startOfDayBalance set at open: $${bal.toFixed(2)}`);
     }
     // After 1340: wait for reconcileMissedTrades to set it correctly from trade history
+  } else if (state.startOfDayBalance === null && state.dayContextRecovered) {
+    // reconcileMissedTrades already recovered dayPnL but ran before this balance
+    // push arrived — backfill startOfDayBalance now using the authoritative dayPnL.
+    state.startOfDayBalance = bal - state.dayPnL;
+    console.log(`[Account] startOfDayBalance backfilled from dayPnL: $${state.startOfDayBalance.toFixed(2)}`);
   }
 
-  // Auto-capture starting balance on first connect so cushion scaling works
-  // without requiring the user to enter it manually (FUNDED_START_BALANCE=-1 means auto)
-  if (CFG.fundedStartBalance < 0 && state.autoStartBalance == null) {
+  // Auto-capture starting balance for funded accounts only (not combines).
+  // Combines use Layer 0a (trail-DD floor scaling) instead.
+  if (CFG.fundedStartBalance < 0 && state.autoStartBalance == null && state.isFunded) {
     state.autoStartBalance = bal;
     console.log(`[Account] Auto-detected starting balance: $${bal.toFixed(2)} — cushion scaling active`);
   }
@@ -1449,10 +2257,19 @@ function onAccountEvent(acct) {
     console.log(`[Account] 🎯 COMBINE TARGET HIT — $${bal.toFixed(2)} (+$${profit})`);
   }
 
-  const drawdown = state.peakBalance - bal;
+  const drawdown = (state.eodPeakBalance ?? state.peakBalance) - bal;
   if (drawdown >= CFG.trailDDWarn) {
     console.log(`[Risk] ⚠️  Trailing drawdown $${drawdown.toFixed(2)} from peak — Topstep limit is $2,000!`);
     notify("⚠️ Drawdown warning!", `Down $${drawdown.toFixed(0)} from peak\nTopstep trailing limit: $2,000 — getting close!`, "urgent").catch(()=>{});
+  }
+
+  // Incremental profit-lock staircase — runs before the full-cap runner close so
+  // it can bank partial gains on trades that reverse before hitting the cap or TP.
+  // Applies to every account: the ladder is expressed as a % of each trade's own
+  // tpTicks, so it self-scales with contract count and strategy TP width and
+  // doesn't depend on how large the daily profit cap is.
+  if (!state.profitCappedToday && !state.runnerClosePending) {
+    checkProfitLockLadder(bal).catch(e => console.warn(`[ProfitLock] error: ${e.message}`));
   }
 
   // Runner failsafe: if total day P&L (realized + unrealized) hits the cap while a
@@ -1521,7 +2338,121 @@ function calcOvernightRange() {
   return Math.max(...bars.map(b => b.high)) - Math.min(...bars.map(b => b.low));
 }
 
+// TopstepX's real per-account-size contract limit — independent of whatever
+// MAX_CONTRACTS is configured to for the pre-lock conservative ceiling.
+function trueAccountMaxContracts() {
+  if (CFG.accountBase >= 150000) return 15;
+  if (CFG.accountBase >= 100000) return 10;
+  if (CFG.accountBase >= 50000)  return 5;
+  return CFG.maxContracts;
+}
+
+// Combine cushion ladder — steps every `stepDollars` of cushion above the
+// trailing-DD floor, capped at `preLockCap` (CFG.maxContracts) while the floor
+// is still trailing. TopstepX locks the trailing DD floor once peak balance
+// reaches the account's starting balance (it never moves again after that,
+// even as balance keeps climbing) — once locked, cushion grows unbounded from
+// a fixed floor instead of being perpetually chased, so the ceiling opens up
+// to the account's true contract limit instead of staying capped at preLockCap.
+function cushionLadderContracts(cushion, isLocked) {
+  const ceiling = isLocked ? trueAccountMaxContracts() : CFG.maxContracts;
+  const steps = Math.floor(Math.max(0, cushion) / CFG.cushionStepDollars);
+  return Math.max(1, Math.min(ceiling, steps + 1));
+}
+
+// Estimate the stop distance (in ticks) a signal will actually get, mirroring
+// the exact formula placeEntry() uses — needed BEFORE entry so sizing can react
+// to it, since bar-anchored stops vary trade to trade instead of being fixed.
+function estimateStopTicks(sig, isLong) {
+  const stopTicks = sig.stopTicks ?? CFG.stopTicks;
+  if (CFG.forceFixedStopTicks != null && !sig.useOwnStop) return CFG.forceFixedStopTicks;
+  if (sig.barHigh != null && sig.barLow != null && sig.price != null) {
+    return isLong
+      ? Math.round((sig.price - sig.barLow) / CFG.tickSize) + stopTicks
+      : Math.round((sig.barHigh - sig.price) / CFG.tickSize) + stopTicks;
+  }
+  return stopTicks;
+}
+
+// Caps contracts so no single trade risks more than CFG.targetRiskDollars,
+// regardless of how many contracts the cushion ladder would otherwise allow.
+// The cushion ladder answers "how much size has this account earned overall";
+// this answers "how much can THIS trade's specific stop distance afford" —
+// take the smaller of the two. Disabled (returns baseContracts unchanged) when
+// TARGET_RISK_DOLLARS isn't set.
+function riskCappedContracts(baseContracts, stopTicksEstimate) {
+  if (!CFG.targetRiskDollars || CFG.targetRiskDollars <= 0) return baseContracts;
+  if (!stopTicksEstimate || stopTicksEstimate <= 0) return baseContracts;
+  const maxByRisk = Math.max(1, Math.floor(CFG.targetRiskDollars / (Math.abs(stopTicksEstimate) * state.tickValue)));
+  return Math.min(baseContracts, maxByRisk);
+}
+
+// Real TopstepX Express Funded scaling table, smoothed internally so we don't
+// always jump straight to whatever TopstepX's own tier allows:
+//   - Below the first real tier threshold: ramp 1ct per fundedScaleBaseStep $,
+//     capped at fundedScaleBase (the real pre-first-tier ceiling). Ramp counts
+//     from the account's real floor (-trailDD), not from $0 profit — the
+//     account already has trailDD dollars of real risk room below $0, so
+//     treating $0 as the ramp's start point undercounts the cushion that
+//     genuinely exists and delays reaching fundedScaleBase later than it should.
+//   - Between tier thresholds: use TopstepX's own tier counts as-is.
+//   - Above the LAST tier's threshold: that tier's count is the real ceiling,
+//     not a jump target — ramp up to it 1ct per fundedScalePostStep $, starting
+//     from the count at the second-to-last tier.
+// TopstepX only raises the limit for the NEXT session once a threshold is
+// crossed, so callers should pass state.startOfDayBalance where available.
+function fundedScalePlanContracts(balance) {
+  const tiers = CFG.fundedScaleTiers;
+  if (tiers.length === 0) return CFG.fundedScaleBase;
+
+  const firstThreshold = tiers[0][0];
+  if (balance < firstThreshold) {
+    if (!CFG.fundedScaleBaseStep) return CFG.fundedScaleBase; // no smoothing configured — old jump-straight behavior
+    const distanceAboveFloor = balance + CFG.trailDD; // real floor is -trailDD, not $0
+    const steps = Math.floor(Math.max(0, distanceAboveFloor) / CFG.fundedScaleBaseStep);
+    return Math.max(1, Math.min(CFG.fundedScaleBase, steps + 1));
+  }
+
+  // Walk every tier except the last — those thresholds map directly to their count.
+  let result = CFG.fundedScaleBase;
+  for (let i = 0; i < tiers.length - 1; i++) {
+    const [threshold, ct] = tiers[i];
+    if (balance >= threshold) result = ct;
+  }
+
+  const [lastThreshold, ceiling] = tiers[tiers.length - 1];
+  if (balance >= lastThreshold) {
+    if (!CFG.fundedScalePostStep) return ceiling; // no smoothing configured — old jump-to-ceiling behavior
+    const stepsAboveLast = Math.floor((balance - lastThreshold) / CFG.fundedScalePostStep);
+    result = Math.min(ceiling, result + 1 + stepsAboveLast);
+  }
+  return result;
+}
+
 function calcContracts() {
+  // User opted out of auto-scaling — trade a fixed size every time, still
+  // subject to the thin-market ATR cap below and TopstepX's own account limit.
+  if (!CFG.autoScaling) {
+    if (edgeDayCapActive()) return Math.max(1, Math.min(CFG.maxContracts, CFG.scaleEdgeDayCapContracts));
+    const sessionATR = calcSessionOpenATR();
+    if (sessionATR !== null && sessionATR < 3.0) return 1;
+    return Math.max(1, CFG.maxContracts);
+  }
+
+  // Default LOW, not high — if balance/peak data isn't available yet (e.g. a
+  // signal fires in the brief window right after a restart before state is
+  // populated), fail safe at 1ct rather than silently trading full size blind.
+  let base = 1;
+
+  // ── Funded scaling plan (real TopstepX table) — takes priority over the
+  // generic Layer 0/0a ladders below when configured. Uses startOfDayBalance,
+  // not the live-updating balance, since TopstepX only raises the limit for
+  // the NEXT session once a threshold is crossed intraday.
+  if (state.isFunded && CFG.fundedScaleTiers.length > 0) {
+    const refBalance = state.startOfDayBalance ?? state.balance ?? 0;
+    base = fundedScalePlanContracts(refBalance);
+  } else {
+
   // ── Layer 0: Funded account cushion-based auto-scaling ────────────────────
   // Activated when FUNDED_START_BALANCE >= 0 (use -1 or omit to disable).
   // TopstepX API returns profit above funded start, not full equity, so
@@ -1529,7 +2460,6 @@ function calcContracts() {
   // Ladder: $2K cushion per contract step, capped at MAX_CONTRACTS.
   // 100K Express Funded (10ct max): reaches full size at $18K cushion (~2 weeks at V5 returns).
   // <$2K=1ct | $2K=2ct | $4K=3ct | $6K=4ct | $8K=5ct | $10K=6ct | $12K=7ct | $14K=8ct | $16K=9ct | $18K+=10ct
-  let base = CFG.maxContracts;
   const startBal = CFG.fundedStartBalance >= 0 ? CFG.fundedStartBalance : state.autoStartBalance ?? null;
   if (startBal != null && state.balance != null) {
     const cushion = state.balance - startBal;
@@ -1548,26 +2478,32 @@ function calcContracts() {
   }
 
   // ── Layer 0a: Combine cushion scaling ────────────────────────────────────
-  // Active when funded scaling (Layer 0) is off. Scales 1ct per $400 above the
-  // trailing DD floor ($97K at start). Each $400 of cushion covers a full bad day
-  // (5 stops × $40/ct) at that contract size — self-regulating: bad day shrinks
-  // cushion, next session trades fewer contracts automatically.
-  // floor = peakBalance − trailDD (trails up with wins, never below $97K)
-  // $0–$399=1ct | $400=2ct | $800=3ct | $1200=4ct | $1600=5ct | $2000=6ct
-  // $2400=7ct | $2800=8ct | $3200=9ct | $3600+=10ct
-  if (startBal == null && state.balance != null && state.peakBalance != null) {
-    const floor    = state.peakBalance - CFG.trailDD;
+  // Active when funded scaling (Layer 0) is off. Self-regulating: a bad day
+  // shrinks cushion, next session trades fewer contracts automatically.
+  // Floor locks at (accountBase − trailDD) once peak balance first reaches
+  // accountBase — matches TopstepX's own trailing-DD-locks-at-starting-balance
+  // rule — so the ladder's ceiling opens up past CFG.maxContracts to the
+  // account's true contract limit once locked (see cushionLadderContracts).
+  // Uses eodPeakBalance, NOT the continuously-updating peakBalance — confirmed
+  // against TopstepX's published rules (2026-10-09) that the real floor only
+  // advances on END-OF-DAY closing balance, never intraday highs. Using the raw
+  // intraday peak here made the computed floor too high/tight on any day price
+  // ran up before the close, understating real cushion and under-sizing contracts.
+  const floorPeak = state.eodPeakBalance ?? state.peakBalance;
+  if (startBal == null && state.balance != null && floorPeak != null) {
+    const isLocked = floorPeak >= CFG.accountBase;
+    const floor    = Math.min(floorPeak, CFG.accountBase) - CFG.trailDD;
     const cushion  = state.balance - floor;
-    const combineMax = cushion >= 3600 ? 10 :
-                       cushion >= 3200 ? 9  :
-                       cushion >= 2800 ? 8  :
-                       cushion >= 2400 ? 7  :
-                       cushion >= 2000 ? 6  :
-                       cushion >= 1600 ? 5  :
-                       cushion >= 1200 ? 4  :
-                       cushion >= 800  ? 3  :
-                       cushion >= 400  ? 2  : 1;
-    base = Math.min(CFG.maxContracts, combineMax);
+    base = cushionLadderContracts(cushion, isLocked);
+  }
+
+  } // end funded-scale-table / Layer 0 / Layer 0a branch
+
+  // ── Funded-account day-of-week edge cap ───────────────────────────────────
+  // Monday and Friday pinned to a fixed size regardless of cushion — week-open/
+  // week-close sessions get less benefit-of-the-doubt sizing. Funded accounts only.
+  if (edgeDayCapActive()) {
+    base = Math.min(base, CFG.scaleEdgeDayCapContracts);
   }
 
   // ── Thin-market cap ───────────────────────────────────────────────────────
@@ -1575,53 +2511,94 @@ function calcContracts() {
   const sessionATR = calcSessionOpenATR();
   if (sessionATR !== null && sessionATR < 3.0) return 1;
 
+  // ── Universal account-size safety ceiling ─────────────────────────────────
+  // Every path above (funded-scale-table, Layer 0 cushion, Layer 0a cushion
+  // ladder) computes `base` from config values that are NOT cross-checked
+  // against the account's real size — a misconfigured FUNDED_SCALE_TIERS
+  // (e.g. a 100K account's table copied onto a 50K account) would otherwise
+  // size well past what TopstepX actually allows for that account. Clamp
+  // against the real per-size ceiling regardless of which path produced `base`.
+  // Applies to combine accounts too (2026-10-05) — confirmed the combine-phase
+  // contract limits match the same 5/10/15 table, not funded-only.
+  //
+  // CFG.maxContracts ALSO applies here now (2026-10-10) — previously it only
+  // capped the funded-scale-table path when the user's config happened to fall
+  // through to Layer 0/0a, never the scale-table path itself, so "Max Contracts"
+  // silently did nothing for any funded account on the real tier table (ours
+  // included). Now a genuine user-set ceiling consistently caps every path, not
+  // just some of them.
+  base = Math.min(base, trueAccountMaxContracts(), CFG.maxContracts);
+
   return Math.max(1, base);
 }
 
 function calcContractsVerbose() {
   // Same as calcContracts but returns a description for the brief
-  let base = CFG.maxContracts;
-  const startBal = CFG.fundedStartBalance >= 0 ? CFG.fundedStartBalance : state.autoStartBalance ?? null;
-  if (startBal != null && state.balance != null) {
-    const cushion = state.balance - startBal;
-    let cushionMax;
-    if      (cushion >= 18000) cushionMax = 10;
-    else if (cushion >= 16000) cushionMax = 9;
-    else if (cushion >= 14000) cushionMax = 8;
-    else if (cushion >= 12000) cushionMax = 7;
-    else if (cushion >= 10000) cushionMax = 6;
-    else if (cushion >= 8000)  cushionMax = 5;
-    else if (cushion >= 6000)  cushionMax = 4;
-    else if (cushion >= 4000)  cushionMax = 3;
-    else if (cushion >= 2000)  cushionMax = 2;
-    else                       cushionMax = 1;
-    base = Math.min(CFG.maxContracts, cushionMax);
+  const edgeDayCapped = edgeDayCapActive();
+  if (!CFG.autoScaling) {
+    const sessionATR = calcSessionOpenATR();
+    const thinMarket  = sessionATR !== null && sessionATR < 3.0;
+    const contracts   = edgeDayCapped ? Math.min(CFG.maxContracts, CFG.scaleEdgeDayCapContracts) : thinMarket ? 1 : Math.max(1, CFG.maxContracts);
+    const regimeLabel = edgeDayCapped
+      ? `📅 Mon/Fri edge day — capped ${CFG.scaleEdgeDayCapContracts}ct`
+      : thinMarket
+      ? `⚠️ THIN ATR(${sessionATR?.toFixed(2)}) — capped 1ct`
+      : `🔒 ${contracts}ct fixed — auto-scaling off`;
+    return { contracts, regimeLabel, streakLabel: "—", regimeMult: 1.0, streakMult: 1.0 };
   }
 
-  // Layer 0a: Combine cushion scaling (mirrors calcContracts)
-  if (startBal == null && state.balance != null && state.peakBalance != null) {
-    const floor    = state.peakBalance - CFG.trailDD;
-    const cushion  = state.balance - floor;
-    const combineMax = cushion >= 3600 ? 10 :
-                       cushion >= 3200 ? 9  :
-                       cushion >= 2800 ? 8  :
-                       cushion >= 2400 ? 7  :
-                       cushion >= 2000 ? 6  :
-                       cushion >= 1600 ? 5  :
-                       cushion >= 1200 ? 4  :
-                       cushion >= 800  ? 3  :
-                       cushion >= 400  ? 2  : 1;
-    base = Math.min(CFG.maxContracts, combineMax);
+  let base = 1;  // same safe-default reasoning as calcContracts()
+  let scaleTableUsed = false;
+  // Hoisted above the branch below — cushionAmt further down needs it regardless
+  // of which branch runs (a scoping bug briefly had this declared only inside the
+  // else block, which threw ReferenceError on every funded-account call, i.e. ours).
+  const floorPeakV = state.eodPeakBalance ?? state.peakBalance;
+  if (state.isFunded && CFG.fundedScaleTiers.length > 0) {
+    const refBalance = state.startOfDayBalance ?? state.balance ?? 0;
+    base = fundedScalePlanContracts(refBalance);
+    scaleTableUsed = true;
+  } else {
+    const startBal = CFG.fundedStartBalance >= 0 ? CFG.fundedStartBalance : state.autoStartBalance ?? null;
+    if (startBal != null && state.balance != null) {
+      const cushion = state.balance - startBal;
+      let cushionMax;
+      if      (cushion >= 18000) cushionMax = 10;
+      else if (cushion >= 16000) cushionMax = 9;
+      else if (cushion >= 14000) cushionMax = 8;
+      else if (cushion >= 12000) cushionMax = 7;
+      else if (cushion >= 10000) cushionMax = 6;
+      else if (cushion >= 8000)  cushionMax = 5;
+      else if (cushion >= 6000)  cushionMax = 4;
+      else if (cushion >= 4000)  cushionMax = 3;
+      else if (cushion >= 2000)  cushionMax = 2;
+      else                       cushionMax = 1;
+      base = Math.min(CFG.maxContracts, cushionMax);
+    }
+
+    // Layer 0a: Combine cushion scaling (mirrors calcContracts) — eodPeakBalance, see note there
+    if (startBal == null && state.balance != null && floorPeakV != null) {
+      const isLocked = floorPeakV >= CFG.accountBase;
+      const floor    = Math.min(floorPeakV, CFG.accountBase) - CFG.trailDD;
+      const cushion  = state.balance - floor;
+      base = cushionLadderContracts(cushion, isLocked);
+    }
   }
+
+  if (edgeDayCapped) base = Math.min(base, CFG.scaleEdgeDayCapContracts);
+  base = Math.min(base, trueAccountMaxContracts(), CFG.maxContracts);  // see note in calcContracts()
 
   const sessionATR = calcSessionOpenATR();
   const thinMarket = sessionATR !== null && sessionATR < 3.0;
   const contracts  = thinMarket ? 1 : Math.max(1, base);
-  const cushionAmt = (state.balance != null && state.peakBalance != null)
-    ? Math.round(state.balance - (state.peakBalance - CFG.trailDD))
+  const cushionAmt = (state.balance != null && floorPeakV != null)
+    ? Math.round(state.balance - (Math.min(floorPeakV, CFG.accountBase) - CFG.trailDD))
     : null;
   const regimeLabel = thinMarket
     ? `⚠️ THIN ATR(${sessionATR?.toFixed(2)}) — capped 1ct`
+    : edgeDayCapped
+    ? `📅 Mon/Fri edge day — capped ${CFG.scaleEdgeDayCapContracts}ct (balance $${(state.startOfDayBalance ?? state.balance)?.toFixed(0) ?? "?"})`
+    : scaleTableUsed
+    ? `🟢 ${contracts}ct  |  scaling-plan balance $${(state.startOfDayBalance ?? state.balance)?.toFixed(0) ?? "?"}`
     : `🟢 ${contracts}ct  |  cushion $${cushionAmt ?? "?"}`;
   return { contracts, regimeLabel, streakLabel: "—", regimeMult: 1.0, streakMult: 1.0 };
 }
@@ -1639,6 +2616,16 @@ async function placeEntry(signalId, isLong, contracts, tradeOpts = {}) {
   if (!state.accountId || !state.contractId) {
     console.warn("[Order] Not ready — accountId or contractId missing");
     return;
+  }
+
+  const manualPos = await untrackedExchangePosition();
+  if (manualPos) {
+    state.activeDirections.delete(isLong ? "long" : "short");
+    if (isLong) state.sessionLongCount = Math.max(0, state.sessionLongCount - 1);
+    standAsideForManual(
+      { id: signalId, price: tradeOpts.sigPrice, tpTicks: tradeOpts.tpTicks, stopTicks: tradeOpts.stopTicks, useOwnStop: tradeOpts.useOwnStop },
+      isLong ? "long" : "short", contracts, manualPos);
+    return null;
   }
 
   // Per-account entry stagger — spreads fills across up to 7.5s so all 4 combines
@@ -1669,7 +2656,9 @@ async function placeEntry(signalId, isLong, contracts, tradeOpts = {}) {
   //   LONG:  stopTicksFromFill = (barLow  - sigPrice) / tickSize - stopTicks  (negative = below fill)
   // Falls back to stopTicks from fill if barHigh/barLow not provided.
   let slTicks;
-  if (stopType === "fixed" && tradeOpts.barHigh != null && tradeOpts.barLow != null && tradeOpts.sigPrice != null) {
+  if (CFG.forceFixedStopTicks != null && !tradeOpts.useOwnStop) {
+    slTicks = isLong ? -CFG.forceFixedStopTicks : CFG.forceFixedStopTicks;
+  } else if (stopType === "fixed" && tradeOpts.barHigh != null && tradeOpts.barLow != null && tradeOpts.sigPrice != null) {
     const sigPrice = tradeOpts.sigPrice;
     if (isLong) {
       slTicks = -Math.round((sigPrice - tradeOpts.barLow) / CFG.tickSize) - stopTicks;  // negative
@@ -1744,6 +2733,7 @@ async function placeEntry(signalId, isLong, contracts, tradeOpts = {}) {
     barHigh: tradeOpts.barHigh ?? null,
     barLow:  tradeOpts.barLow  ?? null,
     sigPrice: tradeOpts.sigPrice ?? null,
+    useOwnStop: tradeOpts.useOwnStop === true,
   });
   state.activeDirections.add(dir);
 
@@ -1789,6 +2779,12 @@ async function placeEntry(signalId, isLong, contracts, tradeOpts = {}) {
           console.log(`[Watchdog] ℹ️  ${signalId}: no open position found — stop already filled, cleaning up`);
           state.openTrades.delete(entryOrderId);
           state.activeDirections.delete(dir);
+          // The fast-stop fill closed before this watchdog ran, so onTradeEvent
+          // never processed it — dayPnL and the profit-cap/DLL checks are now
+          // stale. Reconcile immediately via the same orphan-trade path used
+          // elsewhere, instead of waiting for the next periodic trigger — a
+          // stale dayPnL here means the engine keeps trading past its own cap.
+          reconcileMissedTrades().catch(e => console.error(`[Watchdog] Reconcile after fast-stop failed: ${e.message}`));
           return;
         }
 
@@ -1832,19 +2828,24 @@ async function placeProtectiveOrders(entryOrderId, fillPrice) {
   if (!trade || trade.protected || trade.isProtective) return;
   trade.protected = true;  // prevent double-placement on duplicate events
 
-  const { isLong, contracts, signalId, stopTicks, tpTicks, stopType, barHigh, barLow } = trade;
+  const { isLong, contracts, signalId, stopTicks, tpTicks, stopType, barHigh, barLow, useOwnStop } = trade;
   const closeSide = isLong ? OrderSide.Ask : OrderSide.Bid;  // close = opposite of entry
 
   // Persist open trade state so a restart can recover signal/direction/entry price
   persistOpenTrade({
     entryOrderId, signalId, isLong, contracts, fillPrice,
-    stopTicks, tpTicks, stopType, openedAt: Date.now(),
+    stopTicks, tpTicks, stopType, useOwnStop, openedAt: Date.now(),
   });
 
   // Stop order — trailing or fixed depending on which layer placed the entry
   // For fixed stop: use signal bar high/low + stopTicks if available (matches backtest model).
   // Falls back to fillPrice ± stopTicks if bar context wasn't stored.
   const initialStopPrice = (() => {
+    if (CFG.forceFixedStopTicks != null && !useOwnStop) {
+      return isLong
+        ? fillPrice - CFG.forceFixedStopTicks * CFG.tickSize
+        : fillPrice + CFG.forceFixedStopTicks * CFG.tickSize;
+    }
     if (stopType === "fixed" && barHigh != null && barLow != null) {
       return isLong
         ? barLow  - stopTicks * CFG.tickSize   // LONG: stop below signal bar low
@@ -2001,8 +3002,23 @@ async function placeProtectiveOrders(entryOrderId, fillPrice) {
   }
 
   // ── Track for OCO (cancel survivor when the other fills) ──────────────────
-  if (slId) state.openTrades.set(slId, { signalId, isLong, contracts, isProtective: true, pairedWith: tpId });
-  if (tpId) state.openTrades.set(tpId, { signalId, isLong, contracts, isProtective: true, pairedWith: slId });
+  // intendedPrice lets onTradeEvent compare the actual closing fill against what
+  // we asked for — the data needed to know real slippage before tightening the
+  // stop further (stopType "trail" has no fixed intended price; only "fixed" does).
+  if (slId) state.openTrades.set(slId, { signalId, isLong, contracts, isProtective: true, pairedWith: tpId, intendedPrice: stopType === "fixed" ? initialStopPrice : null, orderKind: "SL" });
+  if (tpId) state.openTrades.set(tpId, { signalId, isLong, contracts, isProtective: true, pairedWith: slId, intendedPrice: tpPrice, orderKind: "TP" });
+
+  // Attach fields the incremental profit-lock staircase needs onto the entry's
+  // own tracking object: the live SL order id to target with /api/Order/modify,
+  // the fill price to measure unrealized gain against, the realized dayPnL at
+  // the moment this trade opened (so per-trade unrealized can be isolated from
+  // total day P&L), and which lock tier (if any) has already been applied.
+  if (trade) {
+    trade.slId          = slId || null;
+    trade.entryFillPrice = fillPrice;
+    trade.dayPnLAtOpen  = state.dayPnL;
+    trade.profitLockLevel = 0;
+  }
 
   // Update persisted state with real bracket order IDs so recoverOpenPosition can restore
   // state.openTrades by exact orderId — eliminates RECOVERED classification after restarts
@@ -2154,6 +3170,12 @@ async function reconcileMissedTrades() {
   if (!state.accountId) return;
   if (state.reconcileInProgress) { console.warn("[Recovery] Already in progress — skipped duplicate call"); return; }
   state.reconcileInProgress = true;
+  // Captured BEFORE the recovery block below can flip it to true — tells the
+  // orphan-trade loop further down whether THIS call already did a full
+  // trade-history resum (which folds every orphan's pnl in automatically) or
+  // whether dayPnL was left untouched coming in, so any orphan found needs its
+  // pnl added explicitly. Using the live value there would always read true.
+  const alreadyRecoveredOnEntry = state.dayContextRecovered;
   try {
     // Always look back to today's session start (13:30 UTC) — never earlier.
     // Before 13:30 UTC there's no AM session yet, so nothing to reconcile.
@@ -2173,7 +3195,13 @@ async function reconcileMissedTrades() {
     // ── Mid-day restart: recover dayPnL and startOfDayBalance from trade history ─
     // The 13:30 UTC day-reset won't fire again after a mid-day restart, so we infer
     // the true start-of-day balance from the sum of today's closed trades.
-    if (!state.dayContextRecovered && state.balance != null) {
+    // dayPnL itself must NOT depend on state.balance being populated yet — balance
+    // arrives async via the hub's account push event, and gating the whole P&L
+    // recovery on it being non-null meant a fast boot (reconcile called moments
+    // after connectHub, before that push lands) silently skipped recovering
+    // dayPnL entirely, leaving the engine's own profit-cap/DLL check blind to
+    // real trades that already happened today.
+    if (!state.dayContextRecovered) {
       let tradedPnL = 0, dayWins = 0, dayLosses = 0;
       for (const t of trades) {
         const p = t.profitAndLoss ?? 0;
@@ -2182,14 +3210,30 @@ async function reconcileMissedTrades() {
           if (p > 0) dayWins++; else dayLosses++;
         }
       }
-      const inferredStart = state.balance - tradedPnL;
-      state.startOfDayBalance  = inferredStart;
       state.dayPnL             = tradedPnL;
       state.dayWins            = dayWins;
       state.dayLosses          = dayLosses;
       state.dayContextRecovered = true;
       writeSharedState(state.dayPnL);
-      console.log(`[Day] ♻️  Mid-day context recovered — day P&L: ${tradedPnL >= 0 ? '+' : ''}$${tradedPnL.toFixed(2)} | wins: ${dayWins} | losses: ${dayLosses} | inferred start: $${inferredStart.toFixed(2)}`);
+      // Fetch a FRESH balance via REST rather than trusting state.balance — it's updated
+      // async via the SignalR account push, which can lag behind a just-closed trade's P&L
+      // by enough to still be in flight here. Using a stale pre-trade balance against a
+      // post-trade tradedPnL double-subtracts that trade (see 2026-10-08 note on the normal
+      // session-reset path above) and knocks the scaling tier down a notch for the rest of
+      // the day on a genuine mid-day restart, which this same subtraction also runs for.
+      let freshBalance = state.balance;
+      try {
+        const acctData = await apiPost("/api/Account/search", {});
+        const acct = acctData.accounts?.find(a => a.id === state.accountId);
+        if (acct?.balance != null) freshBalance = +acct.balance;
+      } catch { /* non-fatal — fall back to state.balance below */ }
+      if (freshBalance != null) {
+        state.balance = freshBalance;
+        state.startOfDayBalance = freshBalance - tradedPnL;
+        console.log(`[Day] ♻️  Mid-day context recovered — day P&L: ${tradedPnL >= 0 ? '+' : ''}$${tradedPnL.toFixed(2)} | wins: ${dayWins} | losses: ${dayLosses} | inferred start: $${state.startOfDayBalance.toFixed(2)}`);
+      } else {
+        console.log(`[Day] ♻️  Mid-day dayPnL recovered — day P&L: ${tradedPnL >= 0 ? '+' : ''}$${tradedPnL.toFixed(2)} | wins: ${dayWins} | losses: ${dayLosses} | (balance not yet available — startOfDayBalance will backfill on next account push)`);
+      }
 
       // Restore gate flags from disk (trend filter, halted, cooldown, etc.)
       // dayPnL above comes from trade history (authoritative); gates file fills in
@@ -2223,6 +3267,33 @@ async function reconcileMissedTrades() {
       if (pnl === 0) entryFills.push(trade);
     }
 
+    // Finds the real entry fill for an orphaned exit — so trades.jsonl stops
+    // logging entry_price:null on nearly every trade (every trade that resolves
+    // via this orphan path, which on this account is almost all of them — every
+    // slippage/MFE question this week needed a live bar re-fetch to answer
+    // because this wasn't captured at write time). Matches the closest-preceding,
+    // not-yet-claimed entry fill with the opposite side and same size — trades
+    // here routinely resolve in well under a second, so timestamp-adjacency is
+    // reliable; the claimed-set stops one entry from being matched to two exits
+    // when a batch has multiple orphans.
+    const claimedEntryIds = new Set();
+    function matchEntryFill(exitTrade) {
+      const exitTime = new Date(exitTrade.creationTimestamp).getTime();
+      const exitSize = exitTrade.size ?? exitTrade.contracts ?? null;
+      let best = null, bestTime = -Infinity;
+      for (const e of entryFills) {
+        const eid = String(e.id ?? e.tradeId ?? "");
+        if (!eid || claimedEntryIds.has(eid)) continue;
+        if (e.side === exitTrade.side) continue;  // closing side must be opposite of entry side
+        if (exitSize != null && (e.size ?? e.contracts) !== exitSize) continue;
+        const eTime = new Date(e.creationTimestamp).getTime();
+        if (eTime > exitTime) continue;  // entry must precede its own exit
+        if (eTime > bestTime) { best = e; bestTime = eTime; }
+      }
+      if (best) claimedEntryIds.add(String(best.id ?? best.tradeId ?? ""));
+      return best;
+    }
+
     for (const trade of trades) {
       const tid = String(trade.id ?? trade.tradeId ?? "");
       if (!tid || state.seenTradeIds.has(tid)) continue;
@@ -2251,7 +3322,76 @@ async function reconcileMissedTrades() {
       // Day P&L was already recovered above via trade history sum, so no DLL risk.
       // Log to trades.jsonl so the day is fully auditable.
       if (!persistedMatch) {
-        console.warn(`[Recovery] ⚠️  Orphaned trade ${tid} (P&L $${pnl.toFixed(2)}) — logging to trades.jsonl (day P&L already recovered)`);
+        // The single-slot `persisted` file can only ever match ONE orphan per
+        // reconcile() call — any batch with 2+ orphans (routine on a day where
+        // trades resolve in ~15ms, faster than SignalR delivers the close event)
+        // left every trade after the first with no strategy attribution and no
+        // slippage data. Recover both directly from the closing ORDER's own
+        // customTag (TopstepX auto-suffixes our own "<signalId>_<ts>" tag with
+        // "-SL"/"-TP" on bracket sub-orders) and stopPrice/limitPrice — far more
+        // reliable than the fragile single-slot file, works no matter how many
+        // trades are in one batch.
+        let orphanSignalId = null, orphanOrderKind = null, orphanExitSlipT = null;
+        const orphanOrderId = trade.orderId ?? trade.order_id ?? null;
+        if (orphanOrderId != null) {
+          try {
+            const od = await apiPost("/api/Order/searchById", { accountId: state.accountId, orderId: orphanOrderId });
+            const order = od?.order ?? (od?.orders ?? od?.items ?? [])[0];
+            if (order?.customTag) {
+              orphanSignalId = order.customTag.replace(/-(SL|TP)$/, '').replace(/_\d{10,}$/, '') || null;
+              orphanOrderKind = /-SL$/.test(order.customTag) ? "SL" : /-TP$/.test(order.customTag) ? "TP" : null;
+            }
+            const intendedPx = order?.type === OrderType.Stop ? order?.stopPrice : order?.type === OrderType.Limit ? order?.limitPrice : null;
+            const exitFillPx = trade.price ?? null;
+            if (intendedPx != null && exitFillPx != null) {
+              // Closing a LONG = sell (worse fill = lower price = adverse); closing
+              // a SHORT = buy (worse fill = higher price = adverse) — trade.side is
+              // the closing fill's own side here, so side===1(Ask/sell) means it was
+              // closing a LONG, side===0(Bid/buy) means it was closing a SHORT.
+              const wasLong = trade.side === 1;
+              orphanExitSlipT = Math.round((wasLong ? intendedPx - exitFillPx : exitFillPx - intendedPx) / CFG.tickSize);
+            }
+          } catch (e) {
+            console.warn(`[Recovery] Order lookup failed for orphan ${tid} (orderId ${orphanOrderId}): ${e.message}`);
+          }
+        }
+        // dayPnL is only guaranteed current if THIS call did the full trade-history
+        // resum above (only happens when dayContextRecovered was false on entry) —
+        // that resum already folds this trade's pnl in, so adding it again here
+        // would double-count. On every LATER call — stuck-gate detection, hub
+        // reconnects, the watchdog's fast-stop path — that resum is skipped
+        // entirely, and an orphan found here represents P&L this engine has never
+        // recorded anywhere, so it must be added and the risk gates re-checked.
+        if (alreadyRecoveredOnEntry) {
+          state.dayPnL += pnl;
+          writeSharedState(state.dayPnL);
+          if (!state.haltedToday && state.dayPnL <= -CFG.dailyLossLimit) {
+            state.haltedToday = true;
+            console.log(`[Day] 🛑 DLL reached via orphan recovery (dayPnL $${state.dayPnL.toFixed(2)}) — halted for today`);
+            saveSessionGates(state);
+          } else if (!state.profitCappedToday && state.dayPnL >= CFG.dailyProfitCap) {
+            state.profitCappedToday = true;
+            console.log(`[Day] 🏁 Profit cap reached via orphan recovery (dayPnL $${state.dayPnL.toFixed(2)}) — no more trades today`);
+            saveSessionGates(state);
+          }
+        }
+        const _dir = trade.side === 0 ? "SHORT" : "LONG";  // closing side is inverse of position direction
+        const _signalLabel = orphanSignalId ?? "ORPHANED";
+        const matchedEntry = matchEntryFill(trade);
+        console.warn(`[Recovery] ⚠️  Orphaned trade ${tid} — ${_signalLabel} ${_dir} (P&L $${pnl.toFixed(2)}) — logging to trades.jsonl (dayPnL now $${state.dayPnL.toFixed(2)})`);
+        // Force a fresh balance fetch right as this trade's P&L books — the async
+        // SignalR account push that normally updates state.balance can lag well
+        // behind this (this whole path exists because trades here routinely close
+        // faster than events arrive), leaving the product UI's account total stuck
+        // on a pre-trade value until the next push happens to land. This is every
+        // trade's real, immediate close — refresh now instead of waiting on it.
+        apiPost("/api/Account/search", {}).then(d => {
+          const acct = d.accounts?.find(a => a.id === state.accountId);
+          if (acct?.balance != null) onAccountEvent({ balance: acct.balance });
+        }).catch(() => {});
+        if (orphanOrderKind === "SL" && orphanOrderId != null) {
+          startSlPostMortem(orphanOrderId, trade.price, trade.size ?? trade.contracts ?? 1, orphanSignalId).catch(() => {});
+        }
         state.seenTradeIds.add(tid);
         saveSeenTradeIds();
         const now = new Date();
@@ -2262,32 +3402,43 @@ async function reconcileMissedTrades() {
           tax_year:      now.getUTCFullYear(),
           contract:      (state.contractId ?? "").split(".").slice(-2).join("") || "ES",
           contract_id:   state.contractId,
-          signal:        "ORPHANED",
-          direction:     trade.side === 0 ? "LONG" : "SHORT",
+          signal:        _signalLabel,
+          // trade.side here is the CLOSING fill's side (only nonzero-P&L trades reach
+          // this branch), which is the OPPOSITE of the position's own direction:
+          // buying to close (Bid=0) means the position was SHORT; selling to close
+          // (Ask=1) means it was LONG.
+          direction:     _dir,
           contracts:     trade.size ?? trade.contracts ?? "?",
-          entry_price:   null,
+          entry_price:     matchedEntry?.price ?? null,
+          entry_timestamp: matchedEntry?.creationTimestamp ?? null,
           exit_price:    trade.price ?? null,
+          exit_order_kind: orphanOrderKind,
+          exit_slip_ticks: orphanExitSlipT,
+          duration_sec:  matchedEntry ? Math.round((new Date(trade.creationTimestamp) - new Date(matchedEntry.creationTimestamp)) / 1000) : null,
           gross_pnl:     +pnl.toFixed(2),
           balance_after: state.balance != null ? +state.balance.toFixed(2) : null,
           peak_balance:  state.peakBalance != null ? +state.peakBalance.toFixed(2) : null,
           day_pnl_after: +state.dayPnL.toFixed(2),
           voided:        trade.voided ?? false,
           section_1256:  true,
-          note:          "recovered after restart — context unavailable",
+          note:          orphanSignalId ? "recovered via order lookup" : "recovered after restart — context unavailable",
         });
-        // Send win/loss notification for the orphaned trade
+        // Send win/loss notification for the orphaned trade. Awaited on purpose —
+        // the engine process has been observed exiting (crash/restart) immediately
+        // after this recovery path runs, which killed the fire-and-forget ntfy POST
+        // mid-flight and silently dropped the notification even though the trade
+        // was already durably logged above.
         const _mkt = (process.env.MARKET ?? "es").toUpperCase();
-        const _dir = trade.side === 0 ? "LONG" : "SHORT";
         if (pnl > 0) {
-          notify(
+          await notify(
             `✅ Winner +$${pnl.toFixed(0)} [recovered]`,
-            `[${_mkt}] ORPHANED ${_dir}\nDay P&L: $${state.dayPnL.toFixed(0)}  |  Recovered after restart`,
+            `[${_mkt}] ${_signalLabel} ${_dir}\nDay P&L: $${state.dayPnL.toFixed(0)}  |  Recovered after restart`,
             "default"
           ).catch(() => {});
         } else {
-          notify(
+          await notify(
             `❌ Loss -$${Math.abs(pnl).toFixed(0)} [recovered]`,
-            `[${_mkt}] ORPHANED ${_dir}\nDay P&L: $${state.dayPnL.toFixed(0)}  |  Recovered after restart`,
+            `[${_mkt}] ${_signalLabel} ${_dir}\nDay P&L: $${state.dayPnL.toFixed(0)}  |  Recovered after restart`,
             "default"
           ).catch(() => {});
         }
@@ -2357,6 +3508,8 @@ async function reconcilePositions() {
     // Root cause: an OCO-paired order was not cancelled when its partner filled (2026-06-12).
     for (const dir of ["long", "short"]) {
       if (openDirs.has(dir) && !state.activeDirections.has(dir)) {
+        // Manual-trade mode: an untracked position with no engine-owned entry is the user's own trade, not an orphan fill.
+        if (ALLOW_MANUAL_TRADES && ![...state.openTrades.values()].some(t => !t.isProtective)) continue;
         console.error(`[Gate] 🚨 ROGUE position detected: API shows open ${dir} position but engine has no gate for it!`);
         notify(
           `🚨 Rogue ${dir} position!`,
@@ -2389,6 +3542,33 @@ async function reconcileDayPnL(label) {
       console.log(`[PnL] 🔄 ${label} reconcile — API balance: $${realBalance.toFixed(2)} | Real day P&L: $${realDayPnL.toFixed(2)} | Was: $${state.dayPnL.toFixed(2)} | Drift: $${drift.toFixed(2)}`);
       state.dayPnL = realDayPnL;
       writeSharedState(state.dayPnL);
+
+      // The dollar drift above can come from a trade this engine never processed
+      // through onTradeEvent (e.g. closed during a disconnect) — dayWins/dayLosses
+      // would then be stale too, showing "Trades: 0" in the EOD summary next to a
+      // real non-zero P&L. Recompute both from actual trade history so the count
+      // matches the dollars.
+      try {
+        const todaySessionStart = new Date();
+        todaySessionStart.setUTCHours(13, 30, 0, 0);
+        const tradeData = await apiPost("/api/Trade/search", {
+          accountId: state.accountId,
+          startTimestamp: todaySessionStart.toISOString(),
+        });
+        if (tradeData.success) {
+          let w = 0, l = 0;
+          for (const t of tradeData.trades ?? tradeData.items ?? []) {
+            const p = t.profitAndLoss ?? 0;
+            if (p === 0 || t.voided) continue;
+            if (p > 0) w++; else l++;
+          }
+          if (w !== state.dayWins || l !== state.dayLosses) {
+            console.log(`[PnL] 🔄 ${label} reconcile — trade counts corrected: ${state.dayWins}W/${state.dayLosses}L → ${w}W/${l}L`);
+            state.dayWins = w;
+            state.dayLosses = l;
+          }
+        }
+      } catch { /* non-fatal — dollar amount above is already correct either way */ }
     } else {
       console.log(`[PnL] ✓ ${label} reconcile — balance $${realBalance.toFixed(2)} | day P&L $${realDayPnL.toFixed(2)} (in sync)`);
     }
@@ -2495,7 +3675,7 @@ async function activePositionWatchdog() {
     const openPositions = (posData.positions ?? []).filter(p => (p.size ?? 0) !== 0);
 
     // Nothing open — reconcilePositions() already handles clearing stuck gates
-    if (openPositions.length === 0) return;
+    if (openPositions.length === 0) { state.manualNoticeKey = null; return; }
 
     const actualPos    = openPositions[0];
     const actualIsLong = actualPos.type === 1;
@@ -2525,6 +3705,14 @@ async function activePositionWatchdog() {
     // ── 2. Ghost position (untracked manual or rogue fill) ───────────────────
     // Engine is flat (no active directions, no openTrades) but exchange has a position.
     const ghostPosition = engineExpectsFlat && state.openTrades.size === 0 && actualSize > 0;
+    if (ghostPosition && ALLOW_MANUAL_TRADES) {
+      const key = `${actualDir}${actualSize}`;
+      if (state.manualNoticeKey !== key) {
+        state.manualNoticeKey = key;
+        console.log(`[Watchdog] 🙋 Untracked ${actualDir.toUpperCase()} ${actualSize}ct on exchange — treating as your manual trade, leaving it alone`);
+      }
+      return;
+    }
     if (ghostPosition) {
       console.warn(`[Watchdog] 👻 Ghost position — ${actualDir.toUpperCase()} ${actualSize}ct on exchange, engine is flat`);
       notify(
@@ -2574,7 +3762,8 @@ async function activePositionWatchdog() {
 // 60-second active position watchdog — covers AM and PM windows with buffer
 setInterval(() => {
   const hm = new Date().getUTCHours() * 100 + new Date().getUTCMinutes();
-  const inRange = (hm >= 1300 && hm < 1530) || (hm >= 1800 && hm < 2030);
+  // Widened to cover the Mon/Fri 17:30 PM-open edge-day window too (harmless on other days).
+  const inRange = (hm >= 1300 && hm < 1530) || (hm >= 1730 && hm < 2030);
   if (inRange) activePositionWatchdog().catch(() => {});
 }, 60_000);
 
@@ -2632,8 +3821,10 @@ function runEvaluate() {
         state.gapUpDay = gap > 1.0;
         const sign = gap >= 0 ? "+" : "";
         if (state.gapUpDay) {
-          console.log(`[Gap] ↑ Gap-up day: open ${firstAMBar.open} vs prior close ${lastPriorBar.close.toFixed(2)} = ${sign}${gap.toFixed(2)}pts — PM session BLOCKED`);
-          notify("⚠️ Gap-Up Day", `ES gapped up ${sign}${gap.toFixed(2)}pts — PM session blocked today (9.9% WR historically)`, "default").catch(console.error);
+          // The PM gap block (and its 9.9% WR stat) is ES-only — the NQ gate below skips it, so don't alert as if PM were blocked.
+          const gapBlocksPM = CFG.contractSearch !== "NQ";
+          console.log(`[Gap] ↑ Gap-up day: open ${firstAMBar.open} vs prior close ${lastPriorBar.close.toFixed(2)} = ${sign}${gap.toFixed(2)}pts — ${gapBlocksPM ? "PM session BLOCKED" : "PM not blocked (NQ)"}`);
+          if (gapBlocksPM) notify("⚠️ Gap-Up Day", `ES gapped up ${sign}${gap.toFixed(2)}pts — PM session blocked today (9.9% WR historically)`, "default").catch(console.error);
         } else {
           console.log(`[Gap] Gap: ${sign}${gap.toFixed(2)}pts — PM normal`);
         }
@@ -2647,8 +3838,14 @@ function runEvaluate() {
   // FOMC days: block non-NQ (directionless/whipsaw); NQ V5 fade signals are exempt —
   //   large FOMC moves are ideal fade setups and 8t stops bound the risk.
   const isNQ = CFG.contractSearch === "NQ";
-  const inAM = hm >= 1330 && hm < 1500 && (!state.isFOMCDay || isNQ);
-  const inPM = hm >= 1800 && hm < 2000 && (!state.isFOMCDay || isNQ) && !isTodayEarlyClose();
+  // Mon/Fri session widening (walk-forward backtested 2026-10-06): AM close 15:00->15:30,
+  // PM open 18:00->17:30. Must mirror nq-strategies.js's amCloseHM()/pmOpenHM() exactly —
+  // keep both in sync if this window is ever adjusted again.
+  const edgeDay = isTodayScaleEdgeDay();
+  const amCloseHM = edgeDay ? 1530 : 1500;
+  const pmOpenHM  = edgeDay ? 1730 : 1800;
+  const inAM = hm >= 1330 && hm < amCloseHM && (!state.isFOMCDay || isNQ);
+  const inPM = hm >= pmOpenHM && hm < 2000 && (!state.isFOMCDay || isNQ) && !isTodayEarlyClose();
   if (!inAM && !inPM) return;
 
   // Monday PM filter: skip for NQ V5 (backtest included Monday PM sessions; fade edge is session-agnostic)
@@ -2715,10 +3912,12 @@ function runEvaluate() {
     } else {
       // Log every evaluated signal before any filter — lets us compare against backtest
       for (const s of signals) {
-        const _slBase = s.side === 'long'
-          ? (s.barLow  != null ? s.barLow  - (s.stopTicks ?? CFG.stopTicks) * 0.25 : s.price - (s.stopTicks ?? CFG.stopTicks) * 0.25)
-          : (s.barHigh != null ? s.barHigh + (s.stopTicks ?? CFG.stopTicks) * 0.25 : s.price + (s.stopTicks ?? CFG.stopTicks) * 0.25);
-        const _slT = Math.round(Math.abs(s.price - _slBase) / 0.25);
+        const _slT = CFG.forceFixedStopTicks != null ? CFG.forceFixedStopTicks : (() => {
+          const _slBase = s.side === 'long'
+            ? (s.barLow  != null ? s.barLow  - (s.stopTicks ?? CFG.stopTicks) * 0.25 : s.price - (s.stopTicks ?? CFG.stopTicks) * 0.25)
+            : (s.barHigh != null ? s.barHigh + (s.stopTicks ?? CFG.stopTicks) * 0.25 : s.price + (s.stopTicks ?? CFG.stopTicks) * 0.25);
+          return Math.round(Math.abs(s.price - _slBase) / 0.25);
+        })();
         console.log(`[Sig] ${hm2} UTC  ${s.id.padEnd(26)} ${s.side.toUpperCase().padEnd(5)}  px:${s.price.toFixed(2)}  SL:${_slT}t  barLow:${s.barLow?.toFixed(2) ?? '?'}`);
       }
     }
@@ -2783,30 +3982,236 @@ function runEvaluate() {
         continue;
       }
     }
-    if (state.activeDirections.has(dir)) continue;  // direction gate (same direction already open)
+    if (manualPositionOpen()) {
+      standAsideForManual(sig, dir, contracts);
+      continue;  // user is in a manual trade — notify instead of entering
+    }
+    if (state.activeDirections.has(dir)) {
+      const blocker = [...state.openTrades.values()].find(t => !t.isProtective && t.isLong === (dir === "long"));
+      logBlockedSignal(sig, dir, blocker?.signalId ?? "unknown");
+      continue;  // direction gate (same direction already open)
+    }
 
-    // Hedge gate: long and short can run simultaneously (separate independent gates).
-    // Both AVWAP_L and 3BAR_BEAR_S can hold positions at the same time — they fire
-    // under different market conditions and are not correlated.
+    // No simultaneous long+short — found 2026-10-07 via a friend's bot logs: the
+    // exchange nets opposite-direction positions on the same contract instead of
+    // holding both, so a "hedge" here silently loses one signal's fill entirely
+    // and can misattribute the other's P&L to the wrong signal ID on recovery.
+    // The 15m path (below) already had this right; the 5m path didn't.
+    const oppositeDir5m = dir === "long" ? "short" : "long";
+    if (state.activeDirections.has(oppositeDir5m)) {
+      console.log(`[Gate] Skipping ${sig.id} ${dir.toUpperCase()} — ${oppositeDir5m} already active (opposing gate)`);
+      continue;
+    }
 
     // Claim direction before async placeEntry to prevent double entry
     state.activeDirections.add(dir);
     if (dir === "long") state.sessionLongCount++;
-    placeEntry(sig.id, dir === "long", contracts, {
+    const sizedContracts = riskCappedContracts(contracts, estimateStopTicks(sig, dir === "long"));
+    const entryTradeOpts = {
       stopTicks: sig.stopTicks ?? CFG.stopTicks,  // per-strategy stop override
       tpTicks:   sig.tpTicks   ?? CFG.tpTicks,   // per-strategy TP override from strategies.js
       stopType:  "fixed",
       barHigh:   sig.barHigh,
       barLow:    sig.barLow,
       sigPrice:  sig.price,
-    }).then(result => {
-      // placeEntry returns null when skipped (e.g. stop too wide) — release gate immediately
-      if (result === null) state.activeDirections.delete(dir);
-    }).catch(err => {
-      console.error("[Order] Error:", err.message);
-      state.activeDirections.delete(dir);  // release on failure
-    });
+      // Opt-out of FORCE_FIXED_STOP_TICKS for this one signal (default: respect the
+      // global override, unchanged for every current strategy). Added 2026-10-12 --
+      // the override was silently stomping the deliberately-tight stop on 4 new
+      // signal families with no way to exempt them; this makes that explicit instead
+      // of implicit the next time a signal needs its own stop distance.
+      useOwnStop: sig.useOwnStop === true,
+    };
+    if (REPLAY_MODE) {
+      // No real order, no real fill event -- record the pending position and let
+      // the replay driver resolve it bar-by-bar (see runReplay()), which is what
+      // keeps activeDirections consistent with live timing instead of resolving
+      // via an immediate lookahead scan (the bug that sank the standalone scripts).
+      simulateEntryReplay(sig.id, dir, entryTradeOpts);
+    } else {
+      placeEntry(sig.id, dir === "long", sizedContracts, entryTradeOpts).then(result => {
+        // placeEntry returns null when skipped (e.g. stop too wide) — release gate immediately
+        if (result === null) state.activeDirections.delete(dir);
+      }).catch(err => {
+        console.error("[Order] Error:", err.message);
+        state.activeDirections.delete(dir);  // release on failure
+      });
+    }
   }
+}
+
+// ─── Replay (backtest) execution + driver ──────────────────────────────────
+// Only ever referenced when REPLAY_MODE=1 (see the Date shim at the top of
+// the file for why this exists). Everything above this point -- runEvaluate()
+// and every gate inside it -- is completely unmodified live code; this
+// section only replaces the mechanical "place a real order" step with a
+// deterministic simulation, and drives the clock + bar feed from history.
+const replayState = {
+  pending: { long: null, short: null }, // { signal, entryPrice, stopPrice, tpPrice }
+  trades: [],   // { date, signal, dir, pnl, win }
+  bars5m: [],   // full historical 5m bar array for the run
+};
+
+function simulateEntryReplay(signalId, dir, tradeOpts) {
+  const isLong = dir === "long";
+  const stopTicks = tradeOpts.stopTicks ?? CFG.stopTicks;
+  const tpTicks   = tradeOpts.tpTicks   ?? CFG.tpTicks;
+  const entryPrice = tradeOpts.sigPrice; // market order, fill ≈ signal price (same assumption placeEntry documents)
+
+  // Identical formula to placeEntry()'s real slTicks calc (topstepx-engine.js,
+  // search "Fixed stop: placed at signal bar high/low") -- kept in exact sync
+  // so a future change to the live formula can't silently diverge from this.
+  let slTicks;
+  if (CFG.forceFixedStopTicks != null && !tradeOpts.useOwnStop) {
+    slTicks = isLong ? -CFG.forceFixedStopTicks : CFG.forceFixedStopTicks;
+  } else if (tradeOpts.stopType === "fixed" && tradeOpts.barHigh != null && tradeOpts.barLow != null) {
+    slTicks = isLong
+      ? -Math.round((entryPrice - tradeOpts.barLow) / CFG.tickSize) - stopTicks
+      : Math.round((tradeOpts.barHigh - entryPrice) / CFG.tickSize) + stopTicks;
+  } else {
+    slTicks = isLong ? -stopTicks : stopTicks;
+  }
+  if (Math.abs(slTicks) > CFG.maxStopTicks) {
+    state.activeDirections.delete(dir); // matches placeEntry's real "skipped" release
+    return;
+  }
+
+  const stopPrice = entryPrice + slTicks * CFG.tickSize;
+  const tpPrice   = isLong ? entryPrice + tpTicks * CFG.tickSize : entryPrice - tpTicks * CFG.tickSize;
+  replayState.pending[dir] = { signal: signalId, isLong, entryPrice, stopPrice, tpPrice };
+}
+
+// Mirrors onTradeEvent()'s essential bookkeeping (topstepx-engine.js, search
+// "Topstep daily loss hard stop") -- deliberately NOT calling onTradeEvent()
+// itself, since that function is built around real order-id/event-id
+// correlation and REST reconciliation that have no meaning here. This keeps
+// only the accounting that actually affects later gates: day P&L, win/loss
+// streaks, the per-signal cooldown timestamp, and the daily halt/cap flags.
+function resolveReplayClose(dir, outcome) {
+  const p = replayState.pending[dir];
+  replayState.pending[dir] = null;
+  state.activeDirections.delete(dir);
+  state.dayPnL += outcome.pnl;
+  replayState.trades.push({ date: ctDateStr(), signal: p.signal, dir, pnl: +outcome.pnl.toFixed(2), win: outcome.win });
+
+  if (outcome.win) {
+    state.consecutiveLosses = 0;
+    state.consecutiveWins++;
+  } else {
+    state.consecutiveWins = 0;
+    state.consecutiveLosses++;
+    if (p.signal !== "RECOVERED" && p.signal !== "unknown") state.lastStopTimes.set(p.signal, Date.now());
+    if (state.consecutiveLosses >= CFG.cooldownLosses) state.cooldownUntil = Date.now() + 30 * 60 * 1000;
+  }
+  if (!state.haltedToday && state.dayPnL <= -CFG.dailyLossLimit) state.haltedToday = true;
+  if (!state.profitCappedToday && state.dayPnL >= CFG.dailyProfitCap) state.profitCappedToday = true;
+}
+
+// Resolve any pending replay position against the bar that just closed --
+// called once per bar, BEFORE runEvaluate() for that same bar, so a position
+// that closes on this bar correctly frees its slot before new signals on the
+// same bar are evaluated (matches the real event ordering: a fill event
+// updates state before the next evaluation tick runs).
+// On a bar where both stop and TP are touched, stop is checked first -- the
+// standard conservative 5m-bar backtest convention (can't know true intrabar
+// order from OHLC alone, so assume the worse outcome). Spot-checked against
+// real 1-min data on 2026-10-13 for one trade that looked suspicious: the
+// stop genuinely was touched first chronologically in that case, confirming
+// this convention isn't silently inflating the loss rate for no reason.
+function checkReplayPending(bar) {
+  for (const dir of ["long", "short"]) {
+    const p = replayState.pending[dir];
+    if (!p) continue;
+    if (p.isLong) {
+      if (bar.low  <= p.stopPrice) resolveReplayClose(dir, { win: false, pnl: (p.stopPrice - p.entryPrice) / CFG.tickSize * state.tickValue });
+      else if (bar.high >= p.tpPrice) resolveReplayClose(dir, { win: true, pnl: (p.tpPrice - p.entryPrice) / CFG.tickSize * state.tickValue });
+    } else {
+      if (bar.high >= p.stopPrice) resolveReplayClose(dir, { win: false, pnl: (p.entryPrice - p.stopPrice) / CFG.tickSize * state.tickValue });
+      else if (bar.low <= p.tpPrice) resolveReplayClose(dir, { win: true, pnl: (p.entryPrice - p.tpPrice) / CFG.tickSize * state.tickValue });
+    }
+  }
+}
+
+async function loadReplayBars(fromDt, toDt) {
+  const { createReadStream } = await import("fs");
+  const { createInterface }  = await import("readline");
+  const bars1m = [];
+  await new Promise(r => {
+    const rl = createInterface({ input: createReadStream(resolve(__dir, "..", "NQ.txt")), crlfDelay: Infinity });
+    rl.on("line", line => {
+      if (!line.trim()) return;
+      const p = line.split(","); if (p.length < 6) return;
+      const [mo, dy, yr] = p[0].split("/");
+      const dt = `${yr}-${mo.padStart(2,"0")}-${dy.padStart(2,"0")}`;
+      if (dt < "2026-05-01" || dt > toDt) return; // warmup buffer before fromDt
+      const [hr, mn] = p[1].split(":");
+      bars1m.push({ time: Date.UTC(+yr,+mo-1,+dy,+hr,+mn)/1000, open:+p[2], high:+p[3], low:+p[4], close:+p[5], volume:+(p[6]||0) });
+    });
+    rl.on("close", r);
+  });
+  bars1m.sort((a,b)=>a.time-b.time);
+  const b5map = new Map();
+  for (const b of bars1m) {
+    const slot = Math.floor(b.time / 300) * 300;
+    if (!b5map.has(slot)) b5map.set(slot, { time:slot, open:b.open, high:b.high, low:b.low, close:b.close, volume:b.volume });
+    else { const r = b5map.get(slot); r.high=Math.max(r.high,b.high); r.low=Math.min(r.low,b.low); r.close=b.close; r.volume+=b.volume; }
+  }
+  return [...b5map.values()].sort((a,b)=>a.time-b.time);
+}
+
+function replayDateStr(ts) { return new Date(ts*1000).toISOString().slice(0,10); }
+
+async function runReplay() {
+  const fromDt = process.env.REPLAY_FROM || "2026-06-01";
+  const toDt   = process.env.REPLAY_TO   || "2026-10-12";
+  console.log(`[Replay] Loading NQ.txt...`);
+  const bars5m = await loadReplayBars(fromDt, toDt);
+  replayState.bars5m = bars5m;
+  console.log(`[Replay] ${bars5m.length} 5m bars loaded. Running ${fromDt} -> ${toDt}...`);
+
+  // Seed state exactly as a fresh boot would, minus anything that requires a
+  // real account connection. resetConfRevState() clears nq-strategies.js's own
+  // per-day Sets so its first real use below starts clean.
+  state.tickValue = CFG.tickValue;
+  resetConfRevState();
+
+  let today = null;
+  for (let i = 0; i < bars5m.length; i++) {
+    const bar = bars5m[i];
+    const dt = replayDateStr(bar.time);
+    if (dt !== today) {
+      today = dt;
+      // Daily gates reset (dayPnL, halt/cap, trend filter) -- these are genuinely
+      // per-calendar-day in the real engine (dayPnL is recomputed fresh each day
+      // from that day's own trade history). activeDirections/pending are
+      // deliberately NOT reset here -- a real resting stop/TP bracket has no
+      // force-close at session end or midnight (confirmed 2026-10-13: no such
+      // mechanism exists in this file), so a position genuinely can and does
+      // carry across a day boundary until it actually resolves.
+      state.haltedToday = false; state.profitCappedToday = false; state.dayPnL = 0;
+      state.noShortsToday = false; state.noLongsToday = false; state.amTrendChecked = false;
+      state.amSessionOpenPrice = null; state.gapUpDay = false; state.sessionLongWon = false; state.sessionLongCount = 0;
+      resetConfRevState();
+    }
+    if (dt > toDt) break;
+
+    // Resolve any pending position against this bar first (matches real event
+    // ordering), then feed state.bars like a real fetchBars(300) call would.
+    checkReplayPending(bar);
+    state.bars = bars5m.slice(Math.max(0, i - 299), i + 1);
+    // Before fromDt this still builds warmup history and resolves pending
+    // positions, but skips evaluation -- no new entries before the requested
+    // window. state.bars.length < 210 matches runEvaluate()'s own warmup gate.
+    if (dt < fromDt || state.bars.length < 210) continue;
+
+    _replayNowMs = (bar.time + 300) * 1000 + 5000; // "now" = a few seconds after this bar closed, matching live cadence
+    runEvaluate();
+  }
+  // Any position still open at the very end of the window is excluded --
+  // consistent with every other backtest this session, and the real engine
+  // has no equivalent of "force-close at data end" since the data just stops.
+
+  console.log(`\n[Replay] Done. ${replayState.trades.length} trades.`);
+  return replayState.trades;
 }
 
 // ─── 15m Strategy Evaluation ─────────────────────────────────────────────────
@@ -2824,6 +4229,7 @@ function runEvaluate15() {
 
   const now = new Date();
   const hm  = now.getUTCHours() * 100 + now.getUTCMinutes();
+  const isNQ = CFG.contractSearch === "NQ";  // was referenced below without being defined in this scope — ReferenceError on every FOMC day
 
   const inAM = hm >= 1330 && hm < 1500 && (!state.isFOMCDay || isNQ);
   const inPM = hm >= 1800 && hm < 2000 && (!state.isFOMCDay || isNQ) && !isTodayEarlyClose();
@@ -2884,7 +4290,8 @@ function runEvaluate15() {
     // Claim gate before async to prevent race with 5m tick
     state.activeDirections.add(dir);
     if (dir === "long") state.sessionLongCount++;
-    placeEntry(sig.id, dir === "long", contracts, {
+    const sizedContracts = riskCappedContracts(contracts, CFG15m.stopTicks);
+    placeEntry(sig.id, dir === "long", sizedContracts, {
       stopTicks: CFG15m.stopTicks,
       tpTicks:   sig.tpTicks ?? CFG15m.tpTicks,   // per-strategy TP override from strategies.js
       stopType:  CFG15m.stopType,
@@ -2905,7 +4312,7 @@ async function preSessionBrief() {
   // so it always returns 0 and triggers false alerts. Check real state instead.
   let engineHealthLine = "✅ running";
   {
-    const hubOk   = state.hub?.state === 1;          // HubConnectionState.Connected = 1
+    const hubOk   = state.hub?.state === HubConnectionState.Connected;
     const acctOk  = !!state.accountId;
     const barsOk  = state.bars?.length >= 10;
     const healthy = hubOk && acctOk && barsOk;
@@ -2932,6 +4339,12 @@ async function preSessionBrief() {
   const { contracts, regimeLabel, streakLabel, regimeMult, streakMult } = calcContractsVerbose();
   const dayPnL = state.dayPnL;
 
+  // CFG.maxContracts is only a real ceiling on the Layer 0/0a cushion-ladder paths —
+  // once the funded-scale-table is active it's unused by calcContracts() and showing
+  // it here is just stale/misleading (e.g. "3 / 1 max" reads like a hard cap that
+  // isn't actually in effect). Show the real effective ceiling instead.
+  const displayMaxContracts = CFG.fundedScaleTiers.length > 0 ? trueAccountMaxContracts() : CFG.maxContracts;
+
   // Volume snapshot — same 20-bar SMA the BB_SQUEEZE / DONCHIAN gates use
   const volAvg20 = volumeSMA(state.bars, 20);
   const lastVol  = state.bars.at(-1)?.volume ?? null;
@@ -2948,23 +4361,27 @@ async function preSessionBrief() {
           ? (needed <= 0 ? `Account mode        : 🎯 COMBINE PASSED — check Topstep dashboard` : `Account mode        : Combine  $${profit.toFixed(0)} / $${CFG.combineTarget.toFixed(2)}  ($${needed.toFixed(2)} to go)`)
           : `Account mode        : Combine`;
       })()
-    : `Account mode        : ⭐ FUNDED  |  Daily profit cap: $${CFG.dailyProfitCap}  |  Max: ${CFG.maxContracts}ct`;
+    : `Account mode        : ⭐ FUNDED  |  Daily profit cap: ${Number.isFinite(CFG.dailyProfitCap) ? `$${CFG.dailyProfitCap}` : "none"}  |  Max: ${displayMaxContracts}ct`;
 
   const lines = [
     ``,
     `━━━ PRE-SESSION BRIEF ${new Date().toUTCString()} ━━━`,
     accountMode,
-    `ES Overnight Range  : ${range != null ? range.toFixed(2) + " pts" : "N/A"}`,
+    `${CFG.contractSearch} Overnight Range  : ${range != null ? range.toFixed(2) + " pts" : "N/A"}`,
     `Regime filter       : ${regimeLabel.padEnd(12)} (${(regimeMult * 100).toFixed(0)}%)`,
     `Streak filter       : ${streakLabel.padEnd(20)} (${(streakMult * 100).toFixed(0)}%)`,
-    `Contracts today     : ${contracts} / ${CFG.maxContracts} max`,
+    `Contracts today     : ${contracts} / ${displayMaxContracts} max`,
     `Day P&L             : ${dayPnL >= 0 ? "+" : ""}$${dayPnL.toFixed(2)}`,
     `Consec. wins        : ${state.consecutiveWins} | Consec. losses: ${state.consecutiveLosses}`,
     `Peak balance        : ${state.peakBalance != null ? "$" + state.peakBalance.toFixed(2) : "N/A"}`,
     `Trail DD limit      : $${CFG.trailDD.toFixed(0)} EOD-trail (warning at -$${CFG.trailDDWarn})`,
     `Daily loss limit    : $${CFG.dailyLossLimit} | Halted: ${state.haltedToday}`,
     CFG.contractSearch === "NQ"
-      ? `5m strategies (V3)  : NQ mode — V3 signals with NQ CFG stops (40t/110t default)`
+      ? (() => {
+          const disabled = new Set(buildUserDisabledStrategies());
+          const nqEnabledCount = ACTIVE_STRATEGIES.filter(s => s.startsWith("NQ_") && !disabled.has(s)).length;
+          return `5m strategies (V5)  : NQ mode — ${nqEnabledCount} active signals, fixed 6t stop, 20-84t TP per-strategy`;
+        })()
       : `5m strategies (V3)  : DONCH15_L(15s/72t) VOLBO_L(6s/12t) VOLBO_S(6s/12t) EMA21_PULL_L(6s/16t) BO10_S(8s/24t) 3BAR_BEAR_S(10s/64t) KELT_L(15s/48t)`,
     CFG.contractSearch === "NQ"
       ? `15m strategies      : none (NQ — V3 5m only)`
@@ -2975,8 +4392,8 @@ async function preSessionBrief() {
         ? `Paused strategies   : none (all 7 V3 signals active)`
         : `Paused strategies   : ⚠️  ${userDisabled.join(", ")} (disabled by user config)`;
     })(),
-    `AM session          : ${state.isFOMCDay ? (CFG.contractSearch === "NQ" ? "⚠️  FOMC day — NQ fade signals ACTIVE (others blocked)" : "⛔ DISABLED (FOMC day)") : `${isDST() ? "7:45–9:00 MDT" : "6:45–8:00 MST"} (13:45-15:00 UTC)`}`,
-    `PM session          : ${state.isFOMCDay ? "⛔ DISABLED (FOMC day)" : isTodayEarlyClose() ? "⛔ DISABLED (early close)" : `${isDST() ? "12:30–1:00 PM MDT" : "11:30 AM–12:00 PM MST"} (18:30-19:00 UTC)`}`,
+    `AM session          : ${state.isFOMCDay ? (CFG.contractSearch === "NQ" ? "⚠️  FOMC day — NQ fade signals ACTIVE (others blocked)" : "⛔ DISABLED (FOMC day)") : `${isDST() ? "7:30–9:00 MDT" : "6:30–8:00 MST"} (13:30-15:00 UTC)`}`,
+    `PM session          : ${state.isFOMCDay ? "⛔ DISABLED (FOMC day)" : isTodayEarlyClose() ? "⛔ DISABLED (early close)" : `${isDST() ? "12:00–2:00 PM MDT" : "11:00 AM–1:00 PM MST"} (18:00-20:00 UTC)`}`,
     `Trend filter        : ${state.noShortsToday ? "📈 UPTREND — shorts suppressed" : state.noLongsToday ? "📉 DOWNTREND — longs suppressed" : state.amTrendChecked ? "→ Neutral — all signals active" : "⏳ Pending (fires at 14:15 UTC)"}`,
     `Overbought gate     : ${state.upPctOverbought ? "🔴 ACTIVE — trending strats suppressed (8+/10 days up)" : "✅ Off"}`,
     `News blocks today   : ${(state._newsBlocks?.length || 0)} Tier-1 event(s)`,
@@ -2987,9 +4404,19 @@ async function preSessionBrief() {
   console.log(lines.join("\n"));
 
   const balance    = state.balance     ?? state.peakBalance ?? null;
-  const peak       = state.peakBalance ?? balance;
-  const ddUsed     = peak != null && balance != null ? Math.max(0, peak - balance) : null;
-  const ddBuffer   = ddUsed != null ? Math.max(0, CFG.trailDD - ddUsed) : null;
+  const peak       = state.peakBalance ?? balance;  // informational display only — true intraday high
+  // Floor/buffer math uses the EOD-locked peak (see note at the eodPeakBalance
+  // persistence functions above) — TopstepX's real trailing-DD floor only
+  // advances on end-of-day closes, not intraday highs.
+  const floorPeakBrief = state.eodPeakBalance ?? peak;
+  const ddUsed     = floorPeakBrief != null && balance != null ? Math.max(0, floorPeakBrief - balance) : null;
+  // Distance to the REAL floor, not "trailDD minus drawdown-from-raw-peak" — those
+  // diverge once the trailing DD locks (peak reaches accountBase and stops moving
+  // the floor further), where continuing to measure against the ever-rising raw
+  // peak would understate how much actual room remains above the frozen floor.
+  const ddBuffer   = (balance != null && floorPeakBrief != null)
+    ? Math.max(0, balance - (Math.min(floorPeakBrief, CFG.accountBase) - CFG.trailDD))
+    : null;
   const profitSoFar = balance != null ? Math.max(0, balance - CFG.accountBase) : null;
 
   const bundlePayload = {
@@ -3013,21 +4440,30 @@ async function preSessionBrief() {
     consecutiveLosses: state.consecutiveLosses,
     maxContracts: CFG.maxContracts,
     tz: isDST() ? "MDT" : "MST",
+    volPct: volPct,
+    haltedToday: !!state.haltedToday,
+    trailDD: CFG.trailDD,
+    upPctOverbought: !!state.upPctOverbought,
   };
   emitBundleEvent('PRESESSION_BRIEF', bundlePayload);
 
-  // Single-account phone notification
-  const briefMsg = [
-    `Engine: ${engineHealthLine}  |  ${contracts}ct  |  News: ${state._newsBlocks?.length || 0}  |  FOMC: ${state.isFOMCDay ? "YES ⚠️" : "No"}`,
-    balance != null ? `Balance: $${balance.toFixed(0)}${ddBuffer != null ? `  |  DD buffer: $${ddBuffer}` : ""}` : null,
-    state.simulated && profitSoFar != null
-      ? `Combine: $${profitSoFar.toFixed(0)} / $${CFG.combineTarget.toFixed(0)}  ($${Math.max(0, CFG.combineTarget - profitSoFar).toFixed(0)} to go)`
-      : null,
-    `Trend: ${bundlePayload.trendStatus}  |  ${regimeLabel}`,
-    volPct != null ? `Vol: ${volPct}% of avg ${volPct >= 120 ? "✅" : volPct >= 80 ? "⚠️" : "🔇"}` : null,
-    `AM 7:45 ${bundlePayload.tz}  |  PM 12:30–2:00`,
-  ].filter(Boolean).join("\n");
-  await notify("📊 Pre-session brief", briefMsg, "default");
+  // Single-account phone notification — suppressed under the multi-account
+  // orchestrator, which sends its own combined PRESESSION_BRIEF (see
+  // bundlePayload above) covering all accounts in one condensed push instead
+  // of one full-text dump per account.
+  if (!HAS_BUNDLE_CONSUMER) {
+    const briefMsg = [
+      `Engine: ${engineHealthLine}  |  ${contracts}ct  |  News: ${state._newsBlocks?.length || 0}  |  FOMC: ${state.isFOMCDay ? "YES ⚠️" : "No"}`,
+      balance != null ? `Balance: $${balance.toFixed(0)}${ddBuffer != null ? `  |  DD buffer: $${ddBuffer}` : ""}` : null,
+      state.simulated && profitSoFar != null
+        ? `Combine: $${profitSoFar.toFixed(0)} / $${CFG.combineTarget.toFixed(0)}  ($${Math.max(0, CFG.combineTarget - profitSoFar).toFixed(0)} to go)`
+        : null,
+      `Trend: ${bundlePayload.trendStatus}  |  ${regimeLabel}`,
+      volPct != null ? `Vol: ${volPct}% of avg ${volPct >= 120 ? "✅" : volPct >= 80 ? "⚠️" : "🔇"}` : null,
+      `AM ${isDST() ? "7:30 MDT" : "6:30 MST"}  |  PM ${isDST() ? "12:00–2:00 PM MDT" : "11:00 AM–1:00 PM MST"}`,
+    ].filter(Boolean).join("\n");
+    await notify("📊 Pre-session brief", briefMsg, "default");
+  }
 }
 
 // ─── End-of-day summary ───────────────────────────────────────────────────────
@@ -3038,15 +4474,23 @@ async function endOfDaySummary() {
     ? `+$${state.dayPnL.toFixed(0)}`
     : `-$${Math.abs(state.dayPnL).toFixed(0)}`;
 
-  // Current balance from last account event; peak is the high watermark
+  // Current balance from last account event; peak is the high watermark (display only)
   const bal         = state.balance     ?? state.peakBalance;
   const peak        = state.peakBalance ?? bal;
   const balStr      = bal  != null ? `$${bal.toFixed(0)}`  : "—";
   const peakStr     = peak != null ? `$${peak.toFixed(0)}` : "—";
 
-  // Trailing DD: Topstep rule — balance must stay above (peak − trailDD)
-  const ddUsed      = peak != null && bal != null ? peak - bal : null;
-  const ddBuffer    = ddUsed != null ? Math.max(0, CFG.trailDD - ddUsed) : null;
+  // Trailing DD: Topstep rule — balance must stay above (peak − trailDD), except
+  // the floor locks at (accountBase − trailDD) once peak first reaches accountBase
+  // and never trails further after that — ddBuffer measures distance to the real
+  // (possibly locked) floor, not a naive trailDD-minus-drawdown-from-raw-peak.
+  // Uses eodPeakBalance, not the raw intraday peak — see note at its persistence
+  // functions above (TopstepX's real floor only advances at end-of-day).
+  const floorPeakEod = state.eodPeakBalance ?? peak;
+  const ddUsed      = floorPeakEod != null && bal != null ? floorPeakEod - bal : null;
+  const ddBuffer    = (bal != null && floorPeakEod != null)
+    ? Math.max(0, bal - (Math.min(floorPeakEod, CFG.accountBase) - CFG.trailDD))
+    : null;
   const ddLine      = ddBuffer != null
     ? `DD used: $${ddUsed.toFixed(0)} / $${CFG.trailDD.toFixed(0)}  (${ddBuffer.toFixed(0)} remaining)`
     : "";
@@ -3121,6 +4565,29 @@ async function weeklyRecap() {
     .map(([id, s]) => `  ${id}: ${s.trades}t ${(s.wins/s.trades*100).toFixed(0)}%WR ${s.pnl >= 0 ? "+" : ""}$${s.pnl.toFixed(0)}`)
     .join("\n");
 
+  // Exit slippage + near-miss/close-call stats — same data sources used for the
+  // Friday deep-dive review, folded into the standing weekly push (2026-10-11)
+  // so every account gets this without anyone needing to ask for it separately.
+  const slipVals = week.map(t => t.exit_slip_ticks).filter(v => v != null);
+  const avgSlip  = slipVals.length ? (slipVals.reduce((a, b) => a + b, 0) / slipVals.length).toFixed(2) : null;
+  const slipLine = avgSlip != null ? `Avg exit slip: ${avgSlip}t (${slipVals.length} trades)` : null;
+
+  let closeCallLine = null;
+  try {
+    if (existsSync(SL_REVIEW_LOG)) {
+      const reviews = readFileSync(SL_REVIEW_LOG, "utf8")
+        .split("\n").filter(Boolean)
+        .map(l => { try { return JSON.parse(l); } catch { return null; } })
+        .filter(r => r && r.resolvedAt && r.resolvedAt.slice(0, 10) >= cutoff);
+      if (reviews.length) {
+        const closeCalls = reviews.filter(r => r.closeCall).length;
+        closeCallLine = `Close calls: ${closeCalls}/${reviews.length} (${(closeCalls / reviews.length * 100).toFixed(0)}%) — stops that just barely missed a reversal to TP`;
+      }
+    }
+  } catch (e) {
+    console.warn("[Weekly] Could not read SL review log:", e.message);
+  }
+
   const bal     = state.balance     != null ? `$${state.balance.toFixed(0)}`     : "—";
   const peak    = state.peakBalance != null ? `$${state.peakBalance.toFixed(0)}` : "—";
   const targetLine = state.balance != null
@@ -3138,6 +4605,8 @@ async function weeklyRecap() {
     `Week: ${week.length} trades  (${wins.length}W / ${losses.length}L  ${wr}% WR)`,
     `Net P&L: ${netPnl >= 0 ? "+" : ""}$${netPnl.toFixed(0)}`,
     `Balance: ${bal}  |  Peak: ${peak}`,
+    slipLine,
+    closeCallLine,
     targetLine,
     week.length ? `\nBy strategy:\n${stratLines}` : "",
   ].filter(Boolean).join("\n");
@@ -3154,6 +4623,7 @@ async function weeklyRecap() {
     net_pnl:       +netPnl.toFixed(2),
     balance:       state.balance     ?? null,
     peak_balance:  state.peakBalance ?? null,
+    avg_exit_slip_ticks: avgSlip != null ? +avgSlip : null,
     by_strategy:   byStrat,
   });
 
@@ -3164,8 +4634,16 @@ async function weeklyRecap() {
 // ─── Minute tick loop ─────────────────────────────────────────────────────────
 let lastBar5Min  = -1;   // tracks the 5-min bucket last evaluated (multiples of 5)
 let lastBar15Min = -1;
+let lastHealthCheckMin = -1;  // tracks the 10-min bucket last checked
 
 async function tick() {
+  if (state.sessionYielded) {
+    if (!sessionNeeded()) return;   // idle: no REST calls, nothing to evaluate
+    state.sessionYielded = false;
+    console.log("[Session] ▶ Trading window approaching — taking the TopstepX login back");
+    notify("Bot taking TopstepX login back", "A trading window is about to start. If you are on the TopstepX web platform you will be logged out; logging in again would log the bot out until the window ends.", "default").catch(() => {});
+    triggerFullReconnect("resuming after yield").catch(console.error);
+  }
   const now = new Date();
   const hm  = now.getUTCHours() * 100 + now.getUTCMinutes();
   const min = now.getUTCMinutes();
@@ -3181,9 +4659,20 @@ async function tick() {
   // Fire in first 10 seconds after each 5m boundary (e.g. 13:50:00–13:50:09).
   if (min % 5 === 0 && sec <= 10 && bar5Bucket !== lastBar5Min) {
     lastBar5Min = bar5Bucket;
-    await Promise.all([fetchBars(300, false, 96), fetchESBars()]).catch(console.error);  // 96h spans Mon AM weekend gap
-    await reconcilePositions().catch(console.error);
+    // Fetch NQ bars and evaluate/place orders FIRST — reconcilePositions() and
+    // fetchESBars() are not inputs to NQ signal evaluation, but used to block
+    // ahead of it anyway, adding a full extra sequential REST round-trip
+    // between "bar closed" and "order placed." That gap is exactly where price
+    // drifts away from the price the signal was based on — measured at an
+    // average of ~4 ticks of adverse entry slippage across this week's real
+    // fills, enough to meaningfully shrink the real stop distance on a 10t
+    // stop. Neither call needs to happen before evaluation, so they're deferred
+    // to run after the order is already in, instead of in front of it.
+    await fetchBars(300, false, 96).catch(console.error);  // 96h spans Mon AM weekend gap
     runEvaluate();
+    if (state.bars.length > 0) checkSlPostMortems(state.bars);
+    reconcilePositions().catch(console.error);
+    fetchESBars().catch(console.error);
   }
 
   // ── Post-boot re-evaluate: fires once if a trade closed while engine was down ──
@@ -3204,6 +4693,74 @@ async function tick() {
     runEvaluate15();
   }
 
+  // Early connectivity check: 13:10 UTC (20 min before AM open, 15 min before
+  // the pre-session brief). Catches a dead/stale SignalR hub with enough lead
+  // time to force a reconnect and confirm it before trading starts — instead
+  // of discovering it in the 13:25 brief with only 5 minutes of buffer.
+  if (hm === 1310 && sec < 10 && !state.earlyHealthCheckDone && !isTodayWeekend() && !isTodayHoliday()) {
+    state.earlyHealthCheckDone = true;
+    const hubOk = state.hub?.state === HubConnectionState.Connected;
+    if (state.hubReconnecting) {
+      console.log("[Health] ⏭️  Early check (13:10 UTC) — reconnect already in progress via onclose, skipping");
+    } else if (!hubOk) {
+      console.warn(`[Health] ⚠️  Early check (13:10 UTC) — hub not connected (state=${state.hub?.state}). Forcing reconnect...`);
+      await notify("⚠️ Pre-open reconnect", "Hub was down at 13:10 check — forcing reconnect now, 20 min before open.", "high").catch(() => {});
+      state.hubReconnecting = true;
+      try {
+        await stopHubSafely();
+        await connectHub();
+        const fixed = state.hub?.state === HubConnectionState.Connected;
+        console.log(fixed ? "[Health] ✅ Early reconnect successful" : "[Health] ❌ Early reconnect still not connected — will retry via normal reconnect logic");
+        await notify(
+          fixed ? "✅ Reconnected before open" : "🚨 Still disconnected — check before 13:30",
+          fixed ? "Hub reconnected with 20 min to spare." : "Reconnect attempt failed. Manual check needed before AM open.",
+          fixed ? "default" : "urgent"
+        ).catch(() => {});
+      } catch (e) {
+        console.error(`[Health] ❌ Early reconnect threw: ${e.message}`);
+        await notify("🚨 Reconnect failed before open", `${e.message}\nManual check needed before 13:30 UTC.`, "urgent").catch(() => {});
+      } finally {
+        state.hubReconnecting = false;
+      }
+    } else {
+      console.log("[Health] ✅ Early check (13:10 UTC) — hub connected, 20 min to open");
+    }
+  }
+
+  // Periodic hub health check — every 10 min, all day. The 13:10 check above only
+  // runs once before the AM open; a GatewayLogout kick (both live accounts share
+  // one TopstepX login, so any fresh login on either one can boot the other's hub
+  // session — confirmed empirically in the logs, not a bug in our own code) can
+  // happen at any time of day. Without this, a kicked hub could sit silently dead
+  // for hours with zero real-time order/position/account events until the next
+  // day's 13:10 check. Quiet unless it actually finds and fixes a problem.
+  if (min % 10 === 0 && sec < 10 && min !== lastHealthCheckMin) {
+    lastHealthCheckMin = min;
+    const hubOk = state.hub?.state === HubConnectionState.Connected;
+    if (state.hubReconnecting) {
+      console.log(`[Health] ⏭️  Periodic check (${hm} UTC) — reconnect already in progress via onclose, skipping`);
+    } else if (!hubOk) {
+      console.warn(`[Health] ⚠️  Periodic check (${hm} UTC) — hub not connected (state=${state.hub?.state}). Forcing reconnect...`);
+      state.hubReconnecting = true;
+      try {
+        await stopHubSafely();
+        await connectHub();
+        const fixed = state.hub?.state === HubConnectionState.Connected;
+        console.log(fixed ? "[Health] ✅ Periodic reconnect successful" : "[Health] ❌ Periodic reconnect still not connected — will retry in 10 min");
+        if (fixed) await reconcileMissedTrades().catch(() => {});
+        await notify(
+          fixed ? "✅ Hub reconnected" : "🚨 Still disconnected",
+          fixed ? `Hub was down, reconnected at ${hm} UTC check.` : "Reconnect attempt failed — will retry in 10 min. Check manually if this repeats.",
+          fixed ? "default" : "urgent"
+        ).catch(() => {});
+      } catch (e) {
+        console.error(`[Health] ❌ Periodic reconnect threw: ${e.message}`);
+      } finally {
+        state.hubReconnecting = false;
+      }
+    }
+  }
+
   // Pre-session brief: 13:25 UTC (5 min before AM open)
   // getUTCSeconds() < 10 prevents double-fire — tick runs every 10s
   if (hm === 1325 && sec < 10 && !state.briefSentToday) {
@@ -3222,9 +4779,11 @@ async function tick() {
 
   // End-of-day summary + post-PM reconcile handled below at 20:05 UTC
 
-  // Weekly recap: Sunday 20:00 UTC (2:00 PM MDT / 1:00 PM MST)
-  // Reads the trade log and summarises the past 7 days
-  if (hm === 2000 && sec < 10 && now.getUTCDay() === 0) {
+  // Weekly recap: Friday 20:00 UTC (2:00 PM MDT / 1:00 PM MST), right after the
+  // PM session closes — moved from Sunday 2026-10-11 to match the cadence the
+  // user asked for ("full report each Friday... after Friday's session closes").
+  // Reads the trade log and summarises the past 7 days.
+  if (hm === 2000 && sec < 10 && now.getUTCDay() === 5) {
     await weeklyRecap().catch(console.error);
   }
 
@@ -3241,12 +4800,12 @@ async function tick() {
     }
     state.dayPnL            = 0;
     writeSharedState(0);
-    saveSessionGates(state);  // write zeroed gates so restore sees today's clean slate
     state.dayWins           = 0;
     state.dayLosses         = 0;
     state.haltedToday       = false;
     state.profitCappedToday  = false;
     state.briefSentToday    = false;
+    state.earlyHealthCheckDone = false;
     state.runnerClosePending = false;
     state.consecutiveLosses  = 0;
     state.consecutiveWins   = 0;
@@ -3277,11 +4836,32 @@ async function tick() {
       } catch { /* non-fatal */ }
     }
     state.startOfDayBalance = state.balance;  // snapshot for post-session reconciliation
+    // This moment IS "end of day" for trailing-DD purposes — today's first trade
+    // hasn't happened yet, so state.balance here is yesterday's real close. Only
+    // point in the whole day this is allowed to advance (see eodPeakBalance note
+    // at boot above).
+    if (state.balance != null) {
+      state.eodPeakBalance = Math.max(state.eodPeakBalance ?? state.balance, state.balance);
+      saveEodPeakBalance(state.eodPeakBalance);
+    }
+    // Nothing left to recover — the line above already has the authoritative start balance.
+    // Found 2026-10-08: leaving this false all day meant the FIRST trade to close (almost
+    // always within seconds, via the fast-close/orphan-recovery path) triggered
+    // reconcileMissedTrades()'s one-time "first recovery" branch, which recomputed
+    // startOfDayBalance from state.balance - tradedPnL — but state.balance hadn't caught
+    // up with that same trade's P&L yet (async SignalR push lag), double-subtracting the
+    // trade's P&L and knocking the scaling tier down a notch mid-day (3ct->2ct observed).
+    state.dayContextRecovered = true;
     // Clear persisted seenTradeIds so today's file starts fresh (yesterday's IDs are irrelevant)
     state.seenTradeIds = new Set();
     saveSeenTradeIds();
     // Clear CONF_REV session state so prior day's push/arm data doesn't bleed into today
     resetConfRevState();
+    // Save gates AFTER every field above is cleared — saving mid-reset (before
+    // profitCappedToday/haltedToday/etc. are zeroed) would persist yesterday's
+    // stale values under today's date, and a restart in that window would
+    // silently restore them and block the entire new session.
+    saveSessionGates(state);
     console.log(`[Day] ✓ New session — daily counters reset | start balance: $${state.balance?.toFixed(2) ?? 'unknown'}`);
   }
 
@@ -3301,7 +4881,7 @@ async function tick() {
 async function main() {
   console.log("╔══════════════════════════════════════════╗");
   console.log("║  TopstepX Engine v1  (ProjectX API)      ║");
-  console.log(`║  ES Futures  |  ${CFG.maxContracts} contracts max              ║`);
+  console.log(`║  ${CFG.contractSearch} Futures  |  ${CFG.maxContracts} contracts max              ║`);
   console.log("╚══════════════════════════════════════════╝");
 
   if (!CFG.userName || !CFG.apiKey) {
@@ -3310,6 +4890,9 @@ async function main() {
 
   await login();
   await resolveAccount();
+  // Restore gates immediately so profitCappedToday/haltedToday are set before
+  // bars load and the first tick fires — avoids the race with reconcileMissedTrades.
+  restoreSessionGates(state);
   await resolveContract();
   await resolveESContract();
   // Boot: fetch 30 days of 5m bars (3000 bars, 720h) to seed the ADR20 cache in nq-strategies.js.
@@ -3317,6 +4900,14 @@ async function main() {
   await Promise.all([fetchBars(3000, false, 720), fetchBars15(300), fetchESBars()]);  // load all bar feeds in parallel
   await refreshNewsFilter();
   await connectHub();
+  // Unconditional — without this, dayPnL starts at 0 in memory on every fresh
+  // restart regardless of what already happened today. It previously only got
+  // recovered by luck (a stuck activeDirections gate, or SignalR's own
+  // reconnect handler), so a clean restart mid-session could silently reset
+  // the engine's own profit-cap/DLL tracking to zero while real P&L sat
+  // unreconciled — relying entirely on TopstepX's external enforcement as
+  // the only backstop.
+  await reconcileMissedTrades().catch(e => console.warn("[Boot] reconcileMissedTrades failed:", e.message));
   await recoverOpenPosition().catch(e => console.warn("[Boot] Recovery check failed:", e.message));
 
   // Compute upPct overbought gate from ES.txt tail (reliable 10-day history)
@@ -3326,8 +4917,26 @@ async function main() {
     console.log(`[Gate] Boot upPct(10d): ${(upPct * 100).toFixed(0)}% up-days (${upCount}/${comparisons}) — overbought gate: ${state.upPctOverbought ? "🔴 ACTIVE" : "✅ off"}`);
   }
 
-  // Tick every 10 seconds — needed to reliably hit the pre-close window (last 10s of each bar)
-  setInterval(() => tick().catch(console.error), 10_000);
+  // Tick every 10 seconds, aligned to true wall-clock boundaries (:00, :10, :20...)
+  // rather than a plain setInterval, which fires 10s after whenever the process
+  // happened to boot. With multiple accounts staggered a couple seconds apart at
+  // startup (to avoid a login rate limit), a boot-relative setInterval means every
+  // account's tick — and therefore every signal evaluation and order submission —
+  // permanently inherits that same offset, every single cycle, all day. Measured
+  // live on 2026-09-28: the second-started account's bar-fetch landed a consistent
+  // ~2s after the first's, tick after tick, correlating with materially worse SL
+  // slippage on that account (2.5t avg vs 0.4t) — plausibly because it was reacting
+  // to the same signal ~2s later. Self-correcting wall-clock alignment removes the
+  // boot-time phase entirely: every account's tick fires within milliseconds of the
+  // same real-world instant, regardless of when its process started.
+  function scheduleNextTick() {
+    const delay = 10_000 - (Date.now() % 10_000);
+    setTimeout(async () => {
+      await tick().catch(console.error);
+      scheduleNextTick();
+    }, delay);
+  }
+  scheduleNextTick();
   await tick();  // run immediately on boot
 
   console.log("[Boot] ✓ Engine running — waiting for session open");
@@ -3336,20 +4945,33 @@ async function main() {
   await notify("🟢 Engine online", `TopstepX engine started\nAccount: $${state.peakBalance?.toFixed(0)}\nContract: ${contractShort}  |  Max: ${CFG.maxContracts}ct\nAM session opens 7:30 ${isDST() ? "MDT" : "MST"}`, "low");
 }
 
-// Retry startup on transient failure — mirrors how the old v9 IB engine handled
-// disconnects internally. Exit only on SIGTERM (handled above) or a permanent error.
-let _startupAttempt = 0;
-(async function startWithRetry() {
-  while (true) {
-    try {
-      await main();
-      return; // main() resolved cleanly (shouldn't happen normally)
-    } catch (err) {
-      _startupAttempt++;
-      const delay = Math.min(10_000 * _startupAttempt, 60_000); // 10s, 20s … 60s cap
-      console.error(`[FATAL] Startup failed (attempt ${_startupAttempt}): ${err.message}`);
-      console.error(`[FATAL] Retrying in ${delay / 1000}s — engine stays alive, no restart needed`);
-      await new Promise(r => setTimeout(r, delay));
+if (REPLAY_MODE) {
+  // Never reaches main() -- no login, no hub, no real API calls at all.
+  runReplay().then(trades => {
+    console.log("REPLAY_TRADES_JSON_START");
+    console.log(JSON.stringify(trades));
+    console.log("REPLAY_TRADES_JSON_END");
+    process.exit(0);
+  }).catch(err => {
+    console.error("[Replay] FATAL:", err.stack || err.message);
+    process.exit(1);
+  });
+} else {
+  // Retry startup on transient failure — mirrors how the old v9 IB engine handled
+  // disconnects internally. Exit only on SIGTERM (handled above) or a permanent error.
+  let _startupAttempt = 0;
+  (async function startWithRetry() {
+    while (true) {
+      try {
+        await main();
+        return; // main() resolved cleanly (shouldn't happen normally)
+      } catch (err) {
+        _startupAttempt++;
+        const delay = Math.min(10_000 * _startupAttempt, 60_000); // 10s, 20s … 60s cap
+        console.error(`[FATAL] Startup failed (attempt ${_startupAttempt}): ${err.message}`);
+        console.error(`[FATAL] Retrying in ${delay / 1000}s — engine stays alive, no restart needed`);
+        await new Promise(r => setTimeout(r, delay));
+      }
     }
-  }
-})();
+  })();
+}
