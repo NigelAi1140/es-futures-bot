@@ -688,6 +688,7 @@ async function saveSettings() {
     dailyProfitCap:     numVal("cfg-profit-cap"),
     contracts:          numVal("cfg-contracts"),
     fundedStartBalance: -1,
+    accountSize:        _detectAccountSize() ?? (Number(document.getElementById("cfg-acct-size")?.value) || state.fullConfig?.trading?.accountSize || 0),
   };
 
   const newConfig = { ...state.fullConfig, trading, market: _currentMarket };

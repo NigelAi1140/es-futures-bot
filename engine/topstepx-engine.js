@@ -618,6 +618,8 @@ const NTFY_CHANNEL = (process.env.NTFY_CHANNEL || "").trim();
 
 async function notify(title, message, priority = "default") {
   if (!NTFY_CHANNEL) return;
+  // NTFY_QUIET=1: no phone pushes except real emergencies (engine health, lost protection/naked position, reconnect failure) — user request 2026-10-21
+  if (process.env.NTFY_QUIET === "1" && !/ENGINE HEALTH|Reconnect failed|Bracket missing|Untracked position|Re-placing brackets|TP order failed|Second wrong-direction|Loss-limit warning/i.test(title)) return;
   try {
     // Multiple accounts commonly share one NTFY_CHANNEL (simpler than subscribing
     // to N separate topics on a phone), and most notify() calls here — DLL hit,
@@ -2257,10 +2259,15 @@ function onAccountEvent(acct) {
     console.log(`[Account] 🎯 COMBINE TARGET HIT — $${bal.toFixed(2)} (+$${profit})`);
   }
 
-  const drawdown = (state.eodPeakBalance ?? state.peakBalance) - bal;
-  if (drawdown >= CFG.trailDDWarn) {
-    console.log(`[Risk] ⚠️  Trailing drawdown $${drawdown.toFixed(2)} from peak — Topstep limit is $2,000!`);
-    notify("⚠️ Drawdown warning!", `Down $${drawdown.toFixed(0)} from peak\nTopstep trailing limit: $2,000 — getting close!`, "urgent").catch(()=>{});
+  // Warn when the balance is within 25% of the MLL above the real floor (works for any account size and after the floor locks).
+  const mllBuffer = bal - mllFloor(state.eodPeakBalance ?? state.peakBalance);
+  if (mllBuffer <= CFG.trailDD * 0.25) {
+    const wDay = new Date().toISOString().slice(0, 10);
+    if (state.mllWarnDay !== wDay || (state.mllWarnBuf ?? Infinity) - mllBuffer >= CFG.trailDD * 0.05) {
+      state.mllWarnDay = wDay; state.mllWarnBuf = mllBuffer;
+      console.log(`[Risk] ⚠️  Only $${mllBuffer.toFixed(0)} above the Maximum Loss Limit floor (MLL $${CFG.trailDD.toFixed(0)})`);
+      notify("⚠️ Loss-limit warning!", `Balance is only $${mllBuffer.toFixed(0)} above the Topstep Maximum Loss Limit floor (MLL $${CFG.trailDD.toFixed(0)}). Account closes if it breaches.`, "urgent").catch(()=>{});
+    }
   }
 
   // Incremental profit-lock staircase — runs before the full-cap runner close so
@@ -2387,6 +2394,18 @@ function riskCappedContracts(baseContracts, stopTicksEstimate) {
   return Math.min(baseContracts, maxByRisk);
 }
 
+// ── Maximum Loss Limit floor (Topstep rule, help.topstep.com "What is the Maximum Loss Limit?") ──
+// The floor trails the highest END-OF-DAY balance minus the MLL (CFG.trailDD: $2,000 / $3,000 / $4,500 for 50K / 100K / 150K)
+// and locks for good once it reaches the account's starting balance: $0 on an Express Funded Account (balances start at 0),
+// the nominal size (CFG.accountBase) on a Combine. So floor = min(eodPeak - MLL, lockLevel). (Fixed 2026-10-22: the old formula
+// locked at lockLevel - MLL, i.e. one MLL too low, which overstated the real cushion once the account had profit.)
+function mllLockLevel() { return state.isFunded ? 0 : CFG.accountBase; }
+function mllFloor(eodPeak) {
+  const start = mllLockLevel();
+  return Math.min(Math.max(eodPeak ?? start, start) - CFG.trailDD, start);
+}
+function mllLocked(eodPeak) { return Math.max(eodPeak ?? mllLockLevel(), mllLockLevel()) - CFG.trailDD >= mllLockLevel(); }
+
 // Real TopstepX Express Funded scaling table, smoothed internally so we don't
 // always jump straight to whatever TopstepX's own tier allows:
 //   - Below the first real tier threshold: ramp 1ct per fundedScaleBaseStep $,
@@ -2408,7 +2427,7 @@ function fundedScalePlanContracts(balance) {
   const firstThreshold = tiers[0][0];
   if (balance < firstThreshold) {
     if (!CFG.fundedScaleBaseStep) return CFG.fundedScaleBase; // no smoothing configured — old jump-straight behavior
-    const distanceAboveFloor = balance + CFG.trailDD; // real floor is -trailDD, not $0
+    const distanceAboveFloor = balance - mllFloor(state.eodPeakBalance ?? state.peakBalance); // distance to the real (possibly locked) MLL floor
     const steps = Math.floor(Math.max(0, distanceAboveFloor) / CFG.fundedScaleBaseStep);
     return Math.max(1, Math.min(CFG.fundedScaleBase, steps + 1));
   }
@@ -2491,8 +2510,8 @@ function calcContracts() {
   // ran up before the close, understating real cushion and under-sizing contracts.
   const floorPeak = state.eodPeakBalance ?? state.peakBalance;
   if (startBal == null && state.balance != null && floorPeak != null) {
-    const isLocked = floorPeak >= CFG.accountBase;
-    const floor    = Math.min(floorPeak, CFG.accountBase) - CFG.trailDD;
+    const isLocked = mllLocked(floorPeak);
+    const floor    = mllFloor(floorPeak);
     const cushion  = state.balance - floor;
     base = cushionLadderContracts(cushion, isLocked);
   }
@@ -2577,8 +2596,8 @@ function calcContractsVerbose() {
 
     // Layer 0a: Combine cushion scaling (mirrors calcContracts) — eodPeakBalance, see note there
     if (startBal == null && state.balance != null && floorPeakV != null) {
-      const isLocked = floorPeakV >= CFG.accountBase;
-      const floor    = Math.min(floorPeakV, CFG.accountBase) - CFG.trailDD;
+      const isLocked = mllLocked(floorPeakV);
+      const floor    = mllFloor(floorPeakV);
       const cushion  = state.balance - floor;
       base = cushionLadderContracts(cushion, isLocked);
     }
@@ -2591,7 +2610,7 @@ function calcContractsVerbose() {
   const thinMarket = sessionATR !== null && sessionATR < 3.0;
   const contracts  = thinMarket ? 1 : Math.max(1, base);
   const cushionAmt = (state.balance != null && floorPeakV != null)
-    ? Math.round(state.balance - (Math.min(floorPeakV, CFG.accountBase) - CFG.trailDD))
+    ? Math.round(state.balance - (mllFloor(floorPeakV)))
     : null;
   const regimeLabel = thinMarket
     ? `⚠️ THIN ATR(${sessionATR?.toFixed(2)}) — capped 1ct`
@@ -4374,7 +4393,7 @@ async function preSessionBrief() {
     `Day P&L             : ${dayPnL >= 0 ? "+" : ""}$${dayPnL.toFixed(2)}`,
     `Consec. wins        : ${state.consecutiveWins} | Consec. losses: ${state.consecutiveLosses}`,
     `Peak balance        : ${state.peakBalance != null ? "$" + state.peakBalance.toFixed(2) : "N/A"}`,
-    `Trail DD limit      : $${CFG.trailDD.toFixed(0)} EOD-trail (warning at -$${CFG.trailDDWarn})`,
+    `Trail DD limit      : $${CFG.trailDD.toFixed(0)} EOD-trail (warns when within ${Math.round(CFG.trailDD * 0.25)} of the floor)`,
     `Daily loss limit    : $${CFG.dailyLossLimit} | Halted: ${state.haltedToday}`,
     CFG.contractSearch === "NQ"
       ? (() => {
@@ -4415,7 +4434,7 @@ async function preSessionBrief() {
   // the floor further), where continuing to measure against the ever-rising raw
   // peak would understate how much actual room remains above the frozen floor.
   const ddBuffer   = (balance != null && floorPeakBrief != null)
-    ? Math.max(0, balance - (Math.min(floorPeakBrief, CFG.accountBase) - CFG.trailDD))
+    ? Math.max(0, balance - (mllFloor(floorPeakBrief)))
     : null;
   const profitSoFar = balance != null ? Math.max(0, balance - CFG.accountBase) : null;
 
@@ -4489,7 +4508,7 @@ async function endOfDaySummary() {
   const floorPeakEod = state.eodPeakBalance ?? peak;
   const ddUsed      = floorPeakEod != null && bal != null ? floorPeakEod - bal : null;
   const ddBuffer    = (bal != null && floorPeakEod != null)
-    ? Math.max(0, bal - (Math.min(floorPeakEod, CFG.accountBase) - CFG.trailDD))
+    ? Math.max(0, bal - (mllFloor(floorPeakEod)))
     : null;
   const ddLine      = ddBuffer != null
     ? `DD used: $${ddUsed.toFixed(0)} / $${CFG.trailDD.toFixed(0)}  (${ddBuffer.toFixed(0)} remaining)`

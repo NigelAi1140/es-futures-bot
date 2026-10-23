@@ -314,6 +314,15 @@ function startAlpacaEngine(config) {
   });
 }
 
+// Topstep Maximum Loss Limit (trailing, end of day) and Combine profit target by account size.
+const SIZE_MLL = { 50000: { trailDD: 2000, target: 3000 }, 100000: { trailDD: 3000, target: 6000 }, 150000: { trailDD: 4500, target: 9000 } };
+function acctSizeFor(account, t) {
+  const m = String(account?.name ?? "").match(/(\d+)\s*K/i), k = m ? parseInt(m[1], 10) * 1000 : 0;
+  if (SIZE_MLL[k]) return k;
+  if (SIZE_MLL[Number(t?.accountSize)]) return Number(t.accountSize);
+  return 50000;
+}
+
 function startAccount(account, config) {
   const entry = procs.get(account.name) ?? { restarts: 0, paused: false };
   if (entry.paused)              return;
@@ -354,6 +363,10 @@ function startAccount(account, config) {
     TREND_DN_PTS:       String(f.downtrendThreshold),
     REGIME_FILTER:        t.regimeFilter ?? "auto",
     FUNDED_START_BALANCE: String(t.fundedStartBalance ?? 0),
+    // Account size drives the Maximum Loss Limit math in the engine (floor, cushion, warnings). Without these the engine
+    // assumed a 100K account for everyone. Size comes from the account name ("50K"/"100K"/"150K"), else the saved setting,
+    // else 50K (the smallest MLL = the most conservative).
+    ...(() => { const sz = acctSizeFor(account, t), m = SIZE_MLL[sz]; return { ACCOUNT_BASE: String(sz), TRAIL_DD: String(m.trailDD), COMBINE_TARGET: String(m.target) }; })(),
     ENABLED_STRATEGIES:   enabledStrats,
     MULTI_ACCOUNT:      "1",
     PARENT_PID:         String(process.pid),
