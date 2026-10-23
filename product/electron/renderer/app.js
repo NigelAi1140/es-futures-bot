@@ -286,26 +286,20 @@ function setPausedUI(paused) {
 }
 
 /* ── Settings panel ───────────────────────────────────────────────────────── */
+let _pickedAcct = null;   // {id, balance} from the last account search (used only to detect size)
+let _manualSize = null;   // size the user picked by hand in the dropdown
+// Size of the ONE configured account. Name first ("50K"/"100K"/"150K"); a Combine's balance sits near its size;
+// an Express Funded account starts at $0, so its balance says nothing about size (returns null -> user picks it).
+// (Before v1.2.44 this looked at every account the app had ever shown, so an old 50K account could win over the new 100K one.)
 function _detectAccountSize() {
-  for (const [name, acct] of Object.entries(state.accounts)) {
-    if (acct.balance) {
-      const b = parseFloat(String(acct.balance).replace(/[$,]/g, ''));
-      if (!isNaN(b) && b > 0) {
-        if (b < 75000)  return 50000;
-        if (b < 125000) return 100000;
-        return 150000;
-      }
-    }
-  }
-  for (const name of Object.keys(state.accounts)) {
-    const m = name.match(/(\d+)K/i);
-    if (m) {
-      const k = parseInt(m[1]);
-      if (k === 50)  return 50000;
-      if (k === 100) return 100000;
-      if (k === 150) return 150000;
-    }
-  }
+  const accts = _settingsAccounts.length ? _settingsAccounts : (state.fullConfig?.broker?.accounts ?? []);
+  const a = accts[0]; if (!a) return null;
+  const m = String(a.name ?? "").match(/(\d+)\s*K/i);
+  if (m) { const k = parseInt(m[1], 10); if (k === 50) return 50000; if (k === 100) return 100000; if (k === 150) return 150000; }
+  if (/^EXPRESS/i.test(a.name ?? "") || a.type === "Funded") return null;
+  const raw = _pickedAcct && String(_pickedAcct.id) === String(a.id) ? _pickedAcct.balance : state.accounts[a.name]?.balance;
+  const b = parseFloat(String(raw ?? "").replace(/[$,]/g, ""));
+  if (!isNaN(b) && b > 0) { if (b < 75000) return 50000; if (b < 125000) return 100000; return 150000; }
   return null;
 }
 
@@ -365,6 +359,7 @@ window.onMarketCheck = onMarketCheck;
 
 function onAcctSizeChange(val) {
   const size = val ? Number(val) : null;
+  _manualSize = size;
   _applyAcctSizeRecs(size);
   if (size && SIZE_RECS[size]) {
     const rec = SIZE_RECS[size];
@@ -393,7 +388,9 @@ function openSettings() {
     setValue("cfg-daily-loss", t.dailyLossLimit);
     setValue("cfg-profit-cap", t.dailyProfitCap);
     setValue("cfg-contracts",  t.contracts);
+    setValue("cfg-acct-size", t.accountSize ? String(t.accountSize) : "");
   }
+  _manualSize = null; _pickedAcct = null;
 
   const detectedSize = _detectAccountSize();
   _applyAcctSizeRecs(detectedSize);
@@ -560,7 +557,10 @@ async function fetchAndAddAccount() {
       type:       match.isFunded ? "Funded" : "Combine",
       strategies: { ...(state.fullConfig?.strategies ?? {}) },
     }];
+    _pickedAcct = { id: match.id, balance: match.balance };
+    _manualSize = null;
     renderAccountsList(_settingsAccounts);
+    _applyAcctSizeRecs(_detectAccountSize());
   } catch (e) {
     msg.textContent = e.message;
   }
@@ -688,7 +688,7 @@ async function saveSettings() {
     dailyProfitCap:     numVal("cfg-profit-cap"),
     contracts:          numVal("cfg-contracts"),
     fundedStartBalance: -1,
-    accountSize:        _detectAccountSize() ?? (Number(document.getElementById("cfg-acct-size")?.value) || state.fullConfig?.trading?.accountSize || 0),
+    accountSize:        _manualSize ?? _detectAccountSize() ?? (Number(document.getElementById("cfg-acct-size")?.value) || state.fullConfig?.trading?.accountSize || 0),
   };
 
   const newConfig = { ...state.fullConfig, trading, market: _currentMarket };
