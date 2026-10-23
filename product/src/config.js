@@ -196,6 +196,7 @@ function validateConfig(cfg) {
   const isAlpaca = cfg.broker?.type === "alpaca";
 
   check(t.contracts,        1, 15,    "trading.contracts");
+  if (t.smallestAccountSize != null && ![0, 50000, 100000, 150000].includes(Number(t.smallestAccountSize))) throw new Error("trading.smallestAccountSize must be 0, 50000, 100000 or 150000");
   check(t.stopLossTicks,    5, 20,    "trading.stopLossTicks");
   check(t.maxStopTicks,    10, 60,    "trading.maxStopTicks");
   check(t.takeProfitTicks, 20, 100,   "trading.takeProfitTicks");

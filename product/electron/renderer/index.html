@@ -120,6 +120,20 @@
         </select>
       </div>
       <label class="field-row">
+        <span class="field-k">Copy trading to other accounts?</span>
+        <input type="checkbox" id="cfg-copy" onchange="onCopyChange()">
+      </label>
+      <div id="copy-size-row" class="acct-size-manual-row" style="display:none">
+        <span class="field-k" style="font-size:10px;opacity:0.65">Smallest account you copy to</span>
+        <select class="field-v" id="cfg-copy-size" onchange="onCopyChange()" style="width:auto;padding:2px 6px;font-size:10px">
+          <option value="">Select…</option>
+          <option value="50000">50K</option>
+          <option value="100000">100K</option>
+          <option value="150000">150K</option>
+        </select>
+      </div>
+      <div id="copy-note" style="display:none;font-size:10px;opacity:0.65;margin:2px 0 6px">Copies get the same trades and contract count, so your smallest account is the limit. Contracts and daily loss are capped to what it can handle.</div>
+      <label class="field-row">
         <span class="field-k">Max Contracts</span>
         <input class="field-v field-v-sm" type="number" id="cfg-contracts" min="1" max="15" placeholder="2">
         <span class="field-rec" id="rec-contracts">—</span>

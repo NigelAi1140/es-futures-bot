@@ -27,6 +27,8 @@
     "atrMinFilter":      2.0,
     "fundedStartBalance": 0,
     "accountSize":        0,
+    "copyTrading":        false,
+    "smallestAccountSize": 0,
 
     "fundedScaleBase":      3,
     "fundedScaleTiers":     "1500:4,2000:5,3000:10",

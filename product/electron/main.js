@@ -316,6 +316,9 @@ function startAlpacaEngine(config) {
 
 // Topstep Maximum Loss Limit (trailing, end of day) and Combine profit target by account size.
 const SIZE_MLL = { 50000: { trailDD: 2000, target: 3000 }, 100000: { trailDD: 3000, target: 6000 }, 150000: { trailDD: 4500, target: 9000 } };
+// Copy trading: the smallest account you copy to caps contracts and daily loss (same numbers as the Settings recommendations).
+const COPY_CAP = { 50000: { contracts: 2, lossLimit: 750 }, 100000: { contracts: 5, lossLimit: 1500 }, 150000: { contracts: 8, lossLimit: 2250 } };
+function copyCap(t) { return t?.copyTrading && COPY_CAP[Number(t.smallestAccountSize)] ? COPY_CAP[Number(t.smallestAccountSize)] : null; }
 function acctSizeFor(account, t) {
   const m = String(account?.name ?? "").match(/(\d+)\s*K/i), k = m ? parseInt(m[1], 10) * 1000 : 0;
   if (SIZE_MLL[k]) return k;
@@ -346,7 +349,7 @@ function startAccount(account, config) {
     ACCOUNT_ID:         account.id ?? "",
     SYMBOL:             config.market === "nq" ? "NQ" : (config.broker.symbol ?? "ES"),
     MARKET:             config.market ?? "es",
-    MAX_CONTRACTS:      String(t.contracts),
+    MAX_CONTRACTS:      String(copyCap(t) ? Math.min(t.contracts, copyCap(t).contracts) : t.contracts),
     SCALE_EDGE_DAY_CAP:           t.scaleEdgeDayCap ? "1" : "0",
     SCALE_EDGE_DAY_CAP_CONTRACTS: String(t.scaleEdgeDayCapContracts ?? 2),
     SCALE_EDGE_DAY_CAP_ALL:       "1",   // Combine accounts too, not just funded
@@ -355,7 +358,7 @@ function startAccount(account, config) {
     MAX_STOP_TICKS:     String(t.maxStopTicks),
     TAKE_PROFIT_TICKS:  String(t.takeProfitTicks),
     TRAIL_TICKS:        String(t.trailTicks),
-    DAILY_LOSS_LIMIT:   String(t.dailyLossLimit),
+    DAILY_LOSS_LIMIT:   String(copyCap(t) ? Math.min(t.dailyLossLimit, copyCap(t).lossLimit) : t.dailyLossLimit),
     DAILY_PROFIT_CAP:   String(t.dailyProfitCap),
     ATR_MIN_FILTER:     String(t.atrMinFilter),
     TREND_FILTER:       f.enabled ? "1" : "0",

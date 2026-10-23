@@ -303,10 +303,28 @@ function _detectAccountSize() {
   return null;
 }
 
+// Copy trading: the smallest account you copy to is the bottleneck for contracts and daily loss.
+function _copySmallest() {
+  const on = document.getElementById("cfg-copy")?.checked;
+  const sz = Number(document.getElementById("cfg-copy-size")?.value) || 0;
+  return on && SIZE_RECS[sz] ? sz : 0;
+}
+function _recSize(size) { const c = _copySmallest(); return c && (!size || c < size) ? c : size; }
+function onCopyChange() {
+  const on = document.getElementById("cfg-copy")?.checked;
+  const row = document.getElementById("copy-size-row"), note = document.getElementById("copy-note");
+  if (row)  row.style.display  = on ? "flex"  : "none";
+  if (note) note.style.display = on ? "block" : "none";
+  const sz = _recSize(_manualSize ?? _detectAccountSize());
+  _applyAcctSizeRecs(_manualSize ?? _detectAccountSize());
+  if (SIZE_RECS[sz]) { setValue("cfg-contracts", SIZE_RECS[sz].contracts); setValue("cfg-daily-loss", SIZE_RECS[sz].lossLimit); setValue("cfg-profit-cap", SIZE_RECS[sz].profitCap); }
+}
+window.onCopyChange = onCopyChange;
+
 function _applyAcctSizeRecs(size) {
   const banner    = document.getElementById("acct-size-banner");
   const manualRow = document.getElementById("acct-size-manual-row");
-  const rec = SIZE_RECS[size];
+  const rec = SIZE_RECS[_recSize(size)] ?? SIZE_RECS[size];
   if (rec) {
     const label = size === 50000 ? "50K" : size === 100000 ? "100K" : "150K";
     if (banner)    { banner.textContent = `✓ ${label} account detected`; banner.style.display = "block"; }
@@ -361,8 +379,8 @@ function onAcctSizeChange(val) {
   const size = val ? Number(val) : null;
   _manualSize = size;
   _applyAcctSizeRecs(size);
-  if (size && SIZE_RECS[size]) {
-    const rec = SIZE_RECS[size];
+  if (size && SIZE_RECS[_recSize(size)]) {
+    const rec = SIZE_RECS[_recSize(size)];
     setValue("cfg-contracts",  rec.contracts);
     setValue("cfg-daily-loss", rec.lossLimit);
     setValue("cfg-profit-cap", rec.profitCap);
@@ -389,11 +407,14 @@ function openSettings() {
     setValue("cfg-profit-cap", t.dailyProfitCap);
     setValue("cfg-contracts",  t.contracts);
     setValue("cfg-acct-size", t.accountSize ? String(t.accountSize) : "");
+    const cp = document.getElementById("cfg-copy"); if (cp) cp.checked = !!t.copyTrading;
+    setValue("cfg-copy-size", t.smallestAccountSize ? String(t.smallestAccountSize) : "");
   }
   _manualSize = null; _pickedAcct = null;
 
   const detectedSize = _detectAccountSize();
   _applyAcctSizeRecs(detectedSize);
+  { const on = document.getElementById("cfg-copy")?.checked; const r = document.getElementById("copy-size-row"), n = document.getElementById("copy-note"); if (r) r.style.display = on ? "flex" : "none"; if (n) n.style.display = on ? "block" : "none"; }
 
   if (cfg) renderAccountsList(cfg.broker?.accounts ?? []);
 
@@ -406,7 +427,7 @@ function openSettings() {
 window.openSettings = openSettings;
 
 function resetToRecommended() {
-  const size = _detectAccountSize();
+  const size = _recSize(_manualSize ?? _detectAccountSize());
   const rec = SIZE_RECS[size] ?? SIZE_RECS[50000];
   setValue("cfg-contracts",  rec.contracts);
   setValue("cfg-daily-loss", rec.lossLimit);
@@ -681,6 +702,8 @@ async function saveSettings() {
   msg.textContent = "Saving...";
   msg.style.color = "var(--green-lo)";
 
+  if (document.getElementById("cfg-copy")?.checked && !_copySmallest()) { msg.textContent = "Pick the smallest account you copy to"; msg.style.color = "var(--red, #e55)"; btn.disabled = false; return; }
+
   const trading = {
     ...(state.fullConfig?.trading ?? {}),
     stopMode:           null,
@@ -688,6 +711,8 @@ async function saveSettings() {
     dailyProfitCap:     numVal("cfg-profit-cap"),
     contracts:          numVal("cfg-contracts"),
     fundedStartBalance: -1,
+    copyTrading:        !!document.getElementById("cfg-copy")?.checked,
+    smallestAccountSize: _copySmallest(),
     accountSize:        _manualSize ?? _detectAccountSize() ?? (Number(document.getElementById("cfg-acct-size")?.value) || state.fullConfig?.trading?.accountSize || 0),
   };
 
