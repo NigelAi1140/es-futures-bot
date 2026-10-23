@@ -1094,7 +1094,7 @@ body.is-mac #btn-minimize         { display: none; }
   color: var(--green-lo);
   letter-spacing: 0.04em;
   white-space: nowrap;
-  width: 28px;
+  min-width: 92px;
   text-align: right;
 }
 

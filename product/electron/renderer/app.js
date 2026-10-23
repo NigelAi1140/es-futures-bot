@@ -79,15 +79,16 @@ const state = {
 let _settingsAccounts = [];  // working copy of broker.accounts while settings panel is open
 let _currentMarket = "es";  // "es" | "nq"
 
+// The six live NQ short fades. Targets are the engine's per-strategy values; the stop is the single forced stop (see _stopTicks()).
 const NQ_STRATS = {
-  NQ_OB_FADE_S:      { label: "OB FADE S",       session: "AM 13:30", tp: "40t", wr: 100, n: 5  },
-  NQ_AM_VWAP_FADE_S: { label: "AM VWAP FADE S",  session: "AM",       tp: "24t", wr: 100, n: 8  },
-  NQ_ADR_FADE_S:     { label: "ADR FADE S",       session: "AM",       tp: "32t", wr: 100, n: 4  },
-  NQ_14H_REV:        { label: "14H REVERSAL",     session: "AM 14+",   tp: "32t", wr: 100, n: 6  },
-  NQ_FIRST30_FADE_S: { label: "FIRST30 FADE S",   session: "AM 14+",   tp: "32t", wr: 100, n: 3  },
-  NQ_PM_VWAP_FADE_S: { label: "PM VWAP FADE S",   session: "PM",       tp: "28t", wr: 100, n: 12 },
-  NQ_ADR_EXHAUST_S:  { label: "ADR EXHAUST S",    session: "AM 14+",   tp: "24t", wr: 100, n: 2  },
+  NQ_AM_VWAP_FADE_S:   { label: "AM VWAP FADE S",   session: "AM",     tpTicks: 72 },
+  NQ_ADR_FADE_S:       { label: "ADR FADE S",       session: "AM",     tpTicks: 80 },
+  NQ_14H_REV_S:        { label: "14H REVERSAL S",   session: "AM 14+", tpTicks: 80 },
+  NQ_FIRST30_FADE_S:   { label: "FIRST30 FADE S",   session: "AM 14+", tpTicks: 76 },
+  NQ_OVERNIGHT_TRAP_S: { label: "OVERNIGHT TRAP S", session: "AM 1st 30m", tpTicks: 80 },
+  NQ_PM_VWAP_FADE_S:   { label: "PM VWAP FADE S",   session: "PM",     tpTicks: 48 },
 };
+const _stopTicks = () => state.fullConfig?.trading?.forceFixedStopTicks ?? 12;
 
 const COMBINE_MAX_CT = { 50000: 5, 100000: 10, 150000: 15 };
 
@@ -350,7 +351,7 @@ function _renderStrategyDisplay(market) {
     for (const [, info] of Object.entries(NQ_STRATS)) {
       const row = document.createElement("div");
       row.className = "strat-display-row";
-      row.innerHTML = `<span class="strat-disp-label">${info.label}</span><span class="strat-disp-sess">${info.session}</span><span class="strat-disp-tp">${info.tp}</span>`;
+      row.innerHTML = `<span class="strat-disp-label">${info.label}</span><span class="strat-disp-sess">${info.session}</span><span class="strat-disp-tp">SL ${_stopTicks()}t · TP ${info.tpTicks}t</span>`;
       container.appendChild(row);
     }
   } else {
@@ -800,9 +801,12 @@ if (window.bot) {
     _currentMarket = cfg.market ?? "es";
 
     $contracts.textContent = t.contracts ? `${t.contracts}ct` : "—";
-    $sltp.textContent      = (t.stopLossTicks && t.takeProfitTicks)
-      ? `${t.stopLossTicks}t / ${t.takeProfitTicks}t`
-      : "—";
+    // NQ: one forced stop for every setup, per-setup targets (48-80t). The old stopLossTicks/takeProfitTicks fields only apply to ES.
+    $sltp.textContent      = _currentMarket === "nq"
+      ? `${t.forceFixedStopTicks ?? 12}t / 48-80t`
+      : (t.stopLossTicks && t.takeProfitTicks)
+        ? `${t.stopLossTicks}t / ${t.takeProfitTicks}t`
+        : "—";
     $dailyLim.textContent  = t.dailyLossLimit  ? `$${t.dailyLossLimit}`  : "—";
     $profitCap.textContent = t.dailyProfitCap  ? `$${t.dailyProfitCap}` : "—";
 
@@ -810,6 +814,9 @@ if (window.bot) {
     const stratCount = Object.entries(s).filter(([k, v]) => v && (_currentMarket !== "nq" || k.startsWith("NQ_"))).length;
     $stratCt.textContent = `${stratCount} active · ${_currentMarket.toUpperCase()}`;
 
+    // Only the configured account runs. Cards left over from accounts swapped earlier in this session are visual leftovers: remove them.
+    { const keep = new Set(cfg.accounts ?? []);
+      for (const n of Object.keys(state.accounts)) if (!keep.has(n)) { document.getElementById(`acct-${CSS.escape(n)}`)?.remove(); delete state.accounts[n]; } }
     if (cfg.accounts && cfg.accounts.length > 0) {
       cfg.accounts.forEach(name => {
         getOrCreateCard(name);
