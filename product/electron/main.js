@@ -363,6 +363,7 @@ function startAccount(account, config) {
     TREND_DN_PTS:       String(f.downtrendThreshold),
     REGIME_FILTER:        t.regimeFilter ?? "auto",
     FUNDED_START_BALANCE: String(t.fundedStartBalance ?? 0),
+    FORCE_FIXED_STOP_TICKS: String(t.forceFixedStopTicks ?? 12),  // same 12-tick stop as the personal engine (was the engine's 10-tick default); config.default.json forceFixedStopTicks
     // Account size drives the Maximum Loss Limit math in the engine (floor, cushion, warnings). Without these the engine
     // assumed a 100K account for everyone. Size comes from the account name ("50K"/"100K"/"150K"), else the saved setting,
     // else 50K (the smallest MLL = the most conservative).
