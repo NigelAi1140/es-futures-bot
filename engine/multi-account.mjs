@@ -136,8 +136,8 @@ logLine(`🚀  ${accounts.length} account(s) configured\n`);
 // ── Bundled push notifications ─────────────────────────────────────────────────
 const NTFY_CHANNEL = (process.env.NTFY_CHANNEL || accounts[0]?.NTFY_CHANNEL || "").trim();
 
-async function notify(title, message, priority = "default") {
-  if (!NTFY_CHANNEL) return;
+async function notify(title, message, priority = "default", emergency = false) {
+  if (!NTFY_CHANNEL || (accounts[0]?.NTFY_QUIET === "1" && !emergency)) return;  // NTFY_QUIET=1: no phone pushes except emergencies (user request 2026-10-21)
   try {
     await axios.post(`https://ntfy.sh/${NTFY_CHANNEL}`, message, {
       headers: { Title: title, Priority: priority, Tags: "chart_with_upwards_trend" },
@@ -404,6 +404,7 @@ function startAccount(account) {
   const entry = procs.get(name) || { restarts: 0, lastStart: 0 };
   if (entry.restarts >= MAX_RESTARTS) {
     logLine(`${pad(name)} ❌  Exceeded ${MAX_RESTARTS} restarts — giving up`, true);
+    notify("🚨 Engine stopped — gave up restarting", `${name} crashed ${MAX_RESTARTS} times and is NOT running. Manual restart needed.`, "urgent", true).catch(() => {});
     return;
   }
 

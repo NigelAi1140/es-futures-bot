@@ -58,6 +58,7 @@ const _hilowRejFiredL  = new Set();
 const _hilowRejFiredS  = new Set();
 const _momExhFiredL    = new Set();
 const _momExhFiredS    = new Set();
+const _spikeDipFired   = new Set(); // NQ_SPIKEDIP_L/S: 1 trade/day total (either direction)
 const _pullbackFiredL  = new Set();
 const _pullbackFiredS  = new Set();
 
@@ -70,6 +71,7 @@ const _amSessionLo    = new Map(); // date → running session low  (for HILOW_R
 const _pbStage        = new Map(); // date → { stage:'wait'|'up'|'dn', peak, prevClose } (PULLBACK_AM)
 
 export function resetConfRevState() {
+  _spikeDipFired.clear();
   _amVwapFiredL.clear();
   _amVwapFiredS.clear();
   _adrFiredL.clear();
@@ -154,6 +156,17 @@ function prevDayClose(bars, today) {
     if (barDate(bars[i].time) < today) return bars[i].close;
   }
   return null;
+}
+
+// Last completed 1h ATR(14) (Wilder) at time t, from whatever 5m bars we were given (needs >= 15 completed hours).
+function hourlyATR14(bars, t) {
+  const hrs = new Map();
+  for (const b of bars) { const k = Math.floor(b.time / 3600) * 3600; const r = hrs.get(k); if (!r) hrs.set(k, { time: k, high: b.high, low: b.low, close: b.close }); else { r.high = Math.max(r.high, b.high); r.low = Math.min(r.low, b.low); r.close = b.close; } }
+  const hs = [...hrs.values()].sort((a, b) => a.time - b.time).filter(h => h.time + 3600 <= t);
+  if (hs.length < 15) return null;
+  let a = null;
+  for (let i = 0; i < hs.length; i++) { const pc = i ? hs[i - 1].close : hs[i].close; const tr = Math.max(hs[i].high - hs[i].low, Math.abs(hs[i].high - pc), Math.abs(hs[i].low - pc)); a = a === null ? tr : (a * 13 + tr) / 14; }
+  return a;
 }
 
 // ── Main evaluator ────────────────────────────────────────────────────────────
@@ -385,6 +398,41 @@ export const evaluateNQ = (bars, _esBars = []) => {
         if (pullT >= 8 && pullT <= 16 && !_pullbackFiredS.has(today)) {
           _pullbackFiredS.add(today);
           signals.push({ id: 'NQ_PULLBACK_AM_S', side: 'short', price: c, stopTicks: 6, tpTicks: 20, stopType: 'fixed', ignoreTrendFilter: true });
+        }
+      }
+    }
+  }
+
+  // ─── NQ_SPIKEDIP_L / NQ_SPIKEDIP_S — Spike-dip follow (added 2026-10-24, trades WITH the spike) ───────────────
+  // A 5m bar spikes >= 1.0 x U (U = last completed 1h ATR(14)) above/below the lowest/highest of the prior 12 bars (spike bar 14:00-18:00 UTC);
+  // then 2 quiet bars (no new extreme), a lower-high (higher-low) bar, and a close through that bar's low (high) -> enter in the spike direction.
+  // Stop = max(12t, 0.2U) from fill (own stop, NOT the forced 12t), TP 2R, 1 trade/day. Same rules as shadow setup G (engine/shadow-setups.mjs).
+  // Backtest 2026-09-01..10-23 (1ct): 38 trades, 47% wins, +$154/trade; 2020-26 history about flat — forward test live at 1ct.
+  if (!_spikeDipFired.has(today) && hm >= 1415) {
+    const i = bars.length - 1;
+    for (let n = Math.max(13, i - 14); n <= i - 3 && !_spikeDipFired.has(today); n++) {
+      if (barDate(bars[n].time) !== today) continue;
+      const hmN = barHM(bars[n].time); if (hmN < 1400 || hmN >= 1800) continue;
+      const U = hourlyATR14(bars, bars[n].time); if (!(U > 0)) continue;
+      for (const sp of [1, -1]) {
+        let base = sp > 0 ? Infinity : -Infinity;
+        for (let k = n - 12; k < n; k++) base = sp > 0 ? Math.min(base, bars[k].low) : Math.max(base, bars[k].high);
+        const ext = sp > 0 ? bars[n].high : bars[n].low;
+        if ((sp > 0 ? ext - base : base - ext) < U) continue;
+        let pk = ext, quiet = 0, lh = -1, hit = false;
+        for (let j = n + 1; j <= i; j++) {
+          if (barDate(bars[j].time) !== today) break;
+          const x = sp > 0 ? bars[j].high : bars[j].low;
+          if (sp > 0 ? x > pk : x < pk) { pk = x; quiet = 0; lh = -1; continue; }
+          quiet++; if (quiet < 2) continue;
+          if (lh < 0) { lh = j; continue; }
+          if (sp > 0 ? bars[j].close < bars[lh].low : bars[j].close > bars[lh].high) { hit = j === i; break; }
+        }
+        if (hit) {
+          _spikeDipFired.add(today);
+          const stopTicks = Math.max(12, Math.ceil((0.2 * U) / TICK));
+          signals.push({ id: sp > 0 ? 'NQ_SPIKEDIP_L' : 'NQ_SPIKEDIP_S', side: sp > 0 ? 'long' : 'short', price: c, stopTicks, tpTicks: 2 * stopTicks, stopType: 'ticks', useOwnStop: true, ignoreTrendFilter: true });
+          break;
         }
       }
     }
