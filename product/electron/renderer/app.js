@@ -86,7 +86,7 @@ const NQ_STRATS = {
   NQ_14H_REV_S:        { label: "14H REVERSAL S",   session: "AM 14+", tpTicks: 80 },
   NQ_FIRST30_FADE_S:   { label: "FIRST30 FADE S",   session: "AM 14+", tpTicks: 76 },
   NQ_OVERNIGHT_TRAP_S: { label: "OVERNIGHT TRAP S", session: "AM 1st 30m", tpTicks: 80 },
-  NQ_PM_VWAP_FADE_S:   { label: "PM VWAP FADE S",   session: "PM",     tpTicks: 48 },
+  NQ_SPIKEDIP:         { label: "SPIKE-DIP FOLLOW", session: "AM/PM", risk: "SL ~0.2 ATR · TP 2R · 1ct" },
 };
 const _stopTicks = () => state.fullConfig?.trading?.forceFixedStopTicks ?? 12;
 
@@ -351,7 +351,7 @@ function _renderStrategyDisplay(market) {
     for (const [, info] of Object.entries(NQ_STRATS)) {
       const row = document.createElement("div");
       row.className = "strat-display-row";
-      row.innerHTML = `<span class="strat-disp-label">${info.label}</span><span class="strat-disp-sess">${info.session}</span><span class="strat-disp-tp">SL ${_stopTicks()}t · TP ${info.tpTicks}t</span>`;
+      row.innerHTML = `<span class="strat-disp-label">${info.label}</span><span class="strat-disp-sess">${info.session}</span><span class="strat-disp-tp">${info.risk ?? `SL ${_stopTicks()}t · TP ${info.tpTicks}t`}</span>`;
       container.appendChild(row);
     }
   } else {

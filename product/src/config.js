@@ -104,8 +104,13 @@ const NQ_DEFAULT_ON_STRATEGIES = {
   NQ_14H_REV_S:        true,
   NQ_FIRST30_FADE_S:   true,
   NQ_OVERNIGHT_TRAP_S: true,
-  NQ_PM_VWAP_FADE_S:   true,
+  NQ_SPIKEDIP_L:       true,
+  NQ_SPIKEDIP_S:       true,
 };
+
+// The Friends & Family bot always runs the SAME strategy set as the owner's personal bot. These are applied on EVERY launch
+// (not once), so a new release changes what every install trades. NQ_PM_VWAP_FADE_S was pulled 2026-10-25 (0 wins in its last 5 live trades).
+const NQ_MANAGED_STRATEGIES = { ...NQ_DEFAULT_ON_STRATEGIES, NQ_PM_VWAP_FADE_S: false };
 
 /**
  * Apply forward-migrations to a merged config object in place.
@@ -125,6 +130,14 @@ function migrateConfig(cfg) {
     for (const [id, val] of Object.entries(NQ_DEFAULT_ON_STRATEGIES)) {
       if (!(id in cfg.strategies)) { cfg.strategies[id] = val; changed = true; }
     }
+  }
+
+  // v1.2.47: keep every NQ install on the owner's strategy set (top-level and per-account overrides).
+  if (cfg.market === "nq") {
+    const sync = obj => { if (!obj || typeof obj !== "object") return; for (const [id, val] of Object.entries(NQ_MANAGED_STRATEGIES)) if (obj[id] !== val) { obj[id] = val; changed = true; } };
+    if (!cfg.strategies || typeof cfg.strategies !== "object") { cfg.strategies = {}; changed = true; }
+    sync(cfg.strategies);
+    if (Array.isArray(cfg.broker?.accounts)) for (const acc of cfg.broker.accounts) if (acc.strategies && typeof acc.strategies === "object") sync(acc.strategies);
   }
 
   // v1.1.19: stopMode "trail" was overriding all strategy-level fixed stops.

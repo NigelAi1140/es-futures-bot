@@ -431,7 +431,7 @@ export const evaluateNQ = (bars, _esBars = []) => {
         if (hit) {
           _spikeDipFired.add(today);
           const stopTicks = Math.max(12, Math.ceil((0.2 * U) / TICK));
-          signals.push({ id: sp > 0 ? 'NQ_SPIKEDIP_L' : 'NQ_SPIKEDIP_S', side: sp > 0 ? 'long' : 'short', price: c, stopTicks, tpTicks: 2 * stopTicks, stopType: 'ticks', useOwnStop: true, ignoreTrendFilter: true });
+          signals.push({ id: sp > 0 ? 'NQ_SPIKEDIP_L' : 'NQ_SPIKEDIP_S', side: sp > 0 ? 'long' : 'short', price: c, stopTicks, tpTicks: 2 * stopTicks, stopType: 'ticks', useOwnStop: true, ignoreTrendFilter: true, maxContracts: 1 });
           break;
         }
       }

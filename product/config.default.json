@@ -44,7 +44,9 @@
     "NQ_14H_REV_S":        true,
     "NQ_FIRST30_FADE_S":   true,
     "NQ_OVERNIGHT_TRAP_S": true,
-    "NQ_PM_VWAP_FADE_S":   true
+    "NQ_SPIKEDIP_L":       true,
+    "NQ_SPIKEDIP_S":       true,
+    "NQ_PM_VWAP_FADE_S":   false
   },
 
   "regime": {

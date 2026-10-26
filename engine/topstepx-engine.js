@@ -4025,7 +4025,8 @@ function runEvaluate() {
     // Claim direction before async placeEntry to prevent double entry
     state.activeDirections.add(dir);
     if (dir === "long") state.sessionLongCount++;
-    const sizedContracts = riskCappedContracts(contracts, estimateStopTicks(sig, dir === "long"));
+    // sig.maxContracts: optional per-signal cap (NQ_SPIKEDIP is held at 1 contract while it is forward-tested)
+    const sizedContracts = Math.min(riskCappedContracts(contracts, estimateStopTicks(sig, dir === "long")), sig.maxContracts ?? Infinity);
     const entryTradeOpts = {
       stopTicks: sig.stopTicks ?? CFG.stopTicks,  // per-strategy stop override
       tpTicks:   sig.tpTicks   ?? CFG.tpTicks,   // per-strategy TP override from strategies.js
