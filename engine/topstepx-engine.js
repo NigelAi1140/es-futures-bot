@@ -3994,7 +3994,8 @@ function runEvaluate() {
     // Early-AM tighter short gate (14:15–14:30 UTC, first 15 min after trend check).
     // Standard threshold is 10pts but borderline uptrend days (5-9pts) still crush shorts
     // in the opening 15 min. Apply a tighter 5pt gate in this window only.
-    if (inAM && dir === "short" && hm >= 1415 && hm < 1430 && state.amSessionOpenPrice !== null) {
+    // (NQ_SPIKEDIP is exempt: its backtest has no such gate, and the gate blocked its first live signal on 2026-10-26, a +$1,016 winner.)
+    if (inAM && dir === "short" && !sig.ignoreEarlyAMGate && hm >= 1415 && hm < 1430 && state.amSessionOpenPrice !== null) {
       const earlyMove = (state.bars.at(-1)?.close ?? state.amSessionOpenPrice) - state.amSessionOpenPrice;
       if (earlyMove >= CFG.earlyAMUptrendPts) {
         console.log(`[Trend] ↑ Early-AM short blocked — move +${earlyMove.toFixed(2)}pts >= ${CFG.earlyAMUptrendPts}pt early gate (${sig.id})`);
