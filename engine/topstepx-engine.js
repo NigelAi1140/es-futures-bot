@@ -19,7 +19,7 @@ import axios from "axios";
 import { HubConnectionBuilder, HttpTransportType, LogLevel, HubConnectionState } from "@microsoft/signalr";
 import dotenv from "dotenv";
 import { evaluate, evaluateExtended } from "./strategies.js";
-import { evaluateNQ, resetConfRevState } from "./nq-strategies.js";
+import { evaluateNQ, resetConfRevState, primeNQHistory } from "./nq-strategies.js";
 import { atr, volumeSMA } from "./indicators.js";
 import { appendFileSync, writeFileSync, openSync, closeSync, unlinkSync, mkdirSync, existsSync, readFileSync } from "fs";
 import { execSync, execFileSync } from "child_process";
@@ -903,12 +903,20 @@ function logWeeklySummary(record) {
 // NQ_BB_SQUEEZE_L/S are NQ-only signals from nq-strategies.js — must be in this list
 // or they bypass the ENABLED_STRATEGIES whitelist filter entirely.
 // V5 NQ signals (Portfolio V5, 2026-09-10 quant rebuild — see nq-strategies.js header for methodology)
-const ACTIVE_STRATEGIES = ["DONCH15_L","VOLBO_L","VOLBO_S","EMA21_PULL_L","BO10_S","3BAR_BEAR_S","KELT_L","NQ_OB_FADE_L","NQ_OB_FADE_S","NQ_AM_VWAP_FADE_L","NQ_AM_VWAP_FADE_S","NQ_ADR_FADE_L","NQ_ADR_FADE_S","NQ_14H_REV_S","NQ_FIRST30_FADE_L","NQ_FIRST30_FADE_S","NQ_PM_VWAP_FADE_L","NQ_PM_VWAP_FADE_S","NQ_OVERNIGHT_TRAP_S","NQ_TIGHT_VWAP_AM_L","NQ_TIGHT_VWAP_AM_S","NQ_HILOW_REJ_AM_L","NQ_HILOW_REJ_AM_S","NQ_MOM_EXHAUST_AM_L","NQ_MOM_EXHAUST_AM_S","NQ_PULLBACK_AM_L","NQ_PULLBACK_AM_S","NQ_SPIKEDIP_L","NQ_SPIKEDIP_S"];
+const ACTIVE_STRATEGIES = ["DONCH15_L","VOLBO_L","VOLBO_S","EMA21_PULL_L","BO10_S","3BAR_BEAR_S","KELT_L","NQ_OB_FADE_L","NQ_OB_FADE_S","NQ_AM_VWAP_FADE_L","NQ_AM_VWAP_FADE_S","NQ_ADR_FADE_L","NQ_ADR_FADE_S","NQ_14H_REV_S","NQ_FIRST30_FADE_L","NQ_FIRST30_FADE_S","NQ_PM_VWAP_FADE_L","NQ_PM_VWAP_FADE_S","NQ_OVERNIGHT_TRAP_S","NQ_TIGHT_VWAP_AM_L","NQ_TIGHT_VWAP_AM_S","NQ_HILOW_REJ_AM_L","NQ_HILOW_REJ_AM_S","NQ_MOM_EXHAUST_AM_L","NQ_MOM_EXHAUST_AM_S","NQ_PULLBACK_AM_L","NQ_PULLBACK_AM_S","NQ_SPIKEDIP_L","NQ_SPIKEDIP_S","NQ_PRIORDAY_L","NQ_PRIORDAY_S"];
 function buildUserDisabledStrategies() {
   const env = process.env.ENABLED_STRATEGIES;
   if (!env) return [];
   const enabled = new Set(env.split(",").map(s => s.trim()));
   return ACTIVE_STRATEGIES.filter(s => !enabled.has(s));
+}
+
+// STRATEGY_MIN_CUSHION="NQ_PRIORDAY_L:3000,NQ_PRIORDAY_S:3000": a strategy stays LOCKED until the account has at least that many
+// dollars above its Maximum Loss Limit floor (balance - mllFloor). For high-risk-per-trade setups that need a bigger cushion.
+function parseMinCushion(env) {
+  const out = {};
+  for (const part of String(env || "").split(",")) { const [id, v] = part.split(":").map(x => x.trim()); if (id && Number.isFinite(+v) && +v > 0) out[id] = +v; }
+  return out;
 }
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -934,6 +942,7 @@ const CFG = {
   // this var correctly. Set FORCE_FIXED_STOP_TICKS to a different value to
   // override, or explicitly to the string "off" to opt back into the
   // bar-anchored model (not recommended).
+  strategyMinCushion: parseMinCushion(process.env.STRATEGY_MIN_CUSHION),
   forceFixedStopTicks: process.env.FORCE_FIXED_STOP_TICKS === "off" ? null : parseInt(process.env.FORCE_FIXED_STOP_TICKS || "10"),
   maxStopTicks:   parseInt(process.env.MAX_STOP_TICKS    || "25"),  // skip trade if bar range would push SL > this many ticks from fill
   trailTicks:     parseInt(process.env.TRAIL_TICKS       || "8"),
@@ -4002,6 +4011,16 @@ function runEvaluate() {
         continue;
       }
     }
+    // Cushion lock: high-risk setups stay off until the account has enough room above its loss floor.
+    const minCushion = CFG.strategyMinCushion[sig.id];
+    if (minCushion) {
+      const cushion = (state.balance ?? NaN) - mllFloor(state.eodPeakBalance ?? state.peakBalance);
+      if (!(cushion >= minCushion)) {
+        const lk = `${sig.id}:${new Date().toISOString().slice(0, 10)}`;
+        if (!(state._cushionLockLogged ??= new Set()).has(lk)) { state._cushionLockLogged.add(lk); console.log(`[Gate] 🔒 ${sig.id} locked — cushion $${Number.isFinite(cushion) ? cushion.toFixed(0) : "?"} is below the $${minCushion} needed (signal skipped)`); }
+        continue;
+      }
+    }
     if (manualPositionOpen()) {
       standAsideForManual(sig, dir, contracts);
       continue;  // user is in a manual trade — notify instead of entering
@@ -4919,6 +4938,7 @@ async function main() {
   // Boot: fetch 30 days of 5m bars (3000 bars, 720h) to seed the ADR20 cache in nq-strategies.js.
   // Periodic 5m bar refreshes use the default 300-bar/48h window — ADR cache persists in module memory.
   await Promise.all([fetchBars(3000, false, 720), fetchBars15(300), fetchESBars()]);  // load all bar feeds in parallel
+  if (CFG.contractSearch === "NQ") { try { primeNQHistory(state.bars); } catch (e) { console.warn(`[NQ] prime history failed: ${e.message}`); } }  // seed prior-day RTH ranges (NQ_PRIORDAY)
   await refreshNewsFilter();
   await connectHub();
   // Unconditional — without this, dayPnL starts at 0 in memory on every fresh

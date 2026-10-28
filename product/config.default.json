@@ -46,6 +46,8 @@
     "NQ_OVERNIGHT_TRAP_S": true,
     "NQ_SPIKEDIP_L":       true,
     "NQ_SPIKEDIP_S":       true,
+    "NQ_PRIORDAY_L":       true,
+    "NQ_PRIORDAY_S":       true,
     "NQ_PM_VWAP_FADE_S":   false
   },
 

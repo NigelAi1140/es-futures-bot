@@ -59,6 +59,9 @@ const _hilowRejFiredS  = new Set();
 const _momExhFiredL    = new Set();
 const _momExhFiredS    = new Set();
 const _spikeDipFired   = new Set(); // NQ_SPIKEDIP_L/S: 1 trade/day total (either direction)
+const _priorDayFiredL  = new Set(); // NQ_PRIORDAY_L: 1/day
+const _priorDayFiredS  = new Set(); // NQ_PRIORDAY_S: 1/day
+const _rthDayCache     = new Map(); // date -> { hi, lo } of the 13:30-20:00 UTC regular session (for NQ_PRIORDAY)
 const _pullbackFiredL  = new Set();
 const _pullbackFiredS  = new Set();
 
@@ -72,6 +75,8 @@ const _pbStage        = new Map(); // date → { stage:'wait'|'up'|'dn', peak, p
 
 export function resetConfRevState() {
   _spikeDipFired.clear();
+  _priorDayFiredL.clear();
+  _priorDayFiredS.clear();
   _amVwapFiredL.clear();
   _amVwapFiredS.clear();
   _adrFiredL.clear();
@@ -158,6 +163,22 @@ function prevDayClose(bars, today) {
   return null;
 }
 
+// Regular-session (13:30-20:00 UTC) high/low per day, kept across calls (the engine only feeds 300 bars = 25h, so the PRIOR day
+// would be gone on Mondays/after restarts). Seeded at boot from the 3000-bar load via primeNQHistory().
+function _updateRTHCache(bars) {
+  for (const b of bars) {
+    const hm = barHM(b.time); if (hm < 1330 || hm >= 2000) continue;
+    const dt = barDate(b.time), r = _rthDayCache.get(dt);
+    if (!r) _rthDayCache.set(dt, { hi: b.high, lo: b.low }); else { r.hi = Math.max(r.hi, b.high); r.lo = Math.min(r.lo, b.low); }
+  }
+}
+export function primeNQHistory(bars) { _updateRTHCache(bars); }
+function _priorRTHDay(today) {
+  let best = null;
+  for (const dt of _rthDayCache.keys()) if (dt < today && (best === null || dt > best)) best = dt;
+  return best === null ? null : _rthDayCache.get(best);
+}
+
 // Last completed 1h ATR(14) (Wilder) at time t, from whatever 5m bars we were given (needs >= 15 completed hours).
 function hourlyATR14(bars, t) {
   const hrs = new Map();
@@ -179,6 +200,7 @@ export const evaluateNQ = (bars, _esBars = []) => {
   const today = barDate(last.time);
   const c     = last.close;
 
+  _updateRTHCache(bars);
   const amClose = amCloseHM(last.time), pmOpen = pmOpenHM(last.time);
   const inAM = hm >= AM_OPEN_HM && hm < amClose;
   const inPM = hm >= pmOpen && hm < PM_CLOSE_HM;
@@ -435,6 +457,25 @@ export const evaluateNQ = (bars, _esBars = []) => {
           break;
         }
       }
+    }
+  }
+
+  // ─── NQ_PRIORDAY_L / NQ_PRIORDAY_S — Prior-day high/low break, continuation (added 2026-10-28) ─────────────────
+  // A 5m bar CLOSES >= 0.05 U beyond the prior regular-session high (low) after the two previous closes were inside -> enter in the break
+  // direction. Stop = 0.12 U back inside the level (typically 50-210 ticks!), skipped if wider than 0.5 U; TP 2R; 1 per side per day.
+  // Same rules as shadow setup B. HIGH RISK per trade ($300-1,000 per contract) -> gated by STRATEGY_MIN_CUSHION (locked until the
+  // account has that much room above its loss floor). Backtest 2026-09-01..10-23: 7 trades, 3 wins, +$29/trade; 1 contract cap.
+  if (hm >= 1345 && hm < 1830 && bars.length >= 3) {
+    const pd = _priorRTHDay(today), U = pd ? hourlyATR14(bars, last.time) : null;
+    if (pd && U > 0) {
+      const c1 = bars[bars.length - 2].close, c2 = bars[bars.length - 3].close;
+      const mk = (side, level, stopPx) => {
+        const stopTicks = Math.max(12, Math.ceil(Math.abs(c - stopPx) / TICK));
+        if (stopTicks * TICK > 0.5 * U) return;
+        signals.push({ id: side === 'long' ? 'NQ_PRIORDAY_L' : 'NQ_PRIORDAY_S', side, price: c, stopTicks, tpTicks: 2 * stopTicks, stopType: 'ticks', useOwnStop: true, ignoreTrendFilter: true, ignoreEarlyAMGate: true, maxContracts: 1 });
+      };
+      if (!_priorDayFiredL.has(today) && c >= pd.hi + 0.05 * U && c1 <= pd.hi && c2 <= pd.hi) { _priorDayFiredL.add(today); mk('long', pd.hi, pd.hi - 0.12 * U); }
+      if (!_priorDayFiredS.has(today) && c <= pd.lo - 0.05 * U && c1 >= pd.lo && c2 >= pd.lo) { _priorDayFiredS.add(today); mk('short', pd.lo, pd.lo + 0.12 * U); }
     }
   }
 

@@ -87,6 +87,7 @@ const NQ_STRATS = {
   NQ_FIRST30_FADE_S:   { label: "FIRST30 FADE S",   session: "AM 14+", tpTicks: 76 },
   NQ_OVERNIGHT_TRAP_S: { label: "OVERNIGHT TRAP S", session: "AM 1st 30m", tpTicks: 80 },
   NQ_SPIKEDIP:         { label: "SPIKE-DIP FOLLOW", session: "AM/PM", risk: "SL ~0.2 ATR · TP 2R · 1ct" },
+  NQ_PRIORDAY:         { label: "PRIOR-DAY BREAK",  session: "AM/PM", risk: "locked until $3,000 cushion" },
 };
 const _stopTicks = () => state.fullConfig?.trading?.forceFixedStopTicks ?? 12;
 

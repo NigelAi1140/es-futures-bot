@@ -106,6 +106,8 @@ const NQ_DEFAULT_ON_STRATEGIES = {
   NQ_OVERNIGHT_TRAP_S: true,
   NQ_SPIKEDIP_L:       true,
   NQ_SPIKEDIP_S:       true,
+  NQ_PRIORDAY_L:       true,   // engine keeps these two LOCKED until the account has a $3,000 cushion (STRATEGY_MIN_CUSHION)
+  NQ_PRIORDAY_S:       true,
 };
 
 // The Friends & Family bot always runs the SAME strategy set as the owner's personal bot. These are applied on EVERY launch
