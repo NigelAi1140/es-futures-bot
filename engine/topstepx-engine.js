@@ -21,7 +21,7 @@ import dotenv from "dotenv";
 import { evaluate, evaluateExtended } from "./strategies.js";
 import { evaluateNQ, resetConfRevState, primeNQHistory } from "./nq-strategies.js";
 import { atr, volumeSMA } from "./indicators.js";
-import { appendFileSync, writeFileSync, openSync, closeSync, unlinkSync, mkdirSync, existsSync, readFileSync } from "fs";
+import { appendFileSync, writeFileSync, openSync, closeSync, unlinkSync, mkdirSync, existsSync, readFileSync, statSync, readSync } from "fs";
 import { execSync, execFileSync } from "child_process";
 import { resolve, dirname, join, basename } from "path";
 import { fileURLToPath } from "url";
@@ -707,6 +707,32 @@ function logTrade(record) {
   } catch (e) {
     console.warn("[Log] Failed to write trade log:", e.message);
   }
+}
+
+// ─── Order-flow snapshot at entry (exploration log for the order-flow test, 2026-10-30) ─────────────────────────
+// Read-only: looks at the market-hub recorder's file for today (logs/marketdata/nq-YYYY-MM-DD.jsonl, written by record-market-hub) and records the
+// aggressor flow in the 60s / 5m before an entry, relative to the trade (positive = buyers/sellers pushing the trade's way), plus the last quote.
+// Written to flow-<account>.jsonl next to the trade log; join to trades by signal + time. Never affects trading; null when the recorder is not running.
+const FLOW_LOG = resolve(LOGS_DIR, `flow-${SAFE_ACCOUNT_ID}.jsonl`);
+function flowSnapshot(isLong, nowMs = Date.now(), file = null) {
+  try {
+    const f = file ?? resolve(LOGS_DIR, "marketdata", `nq-${new Date(nowMs).toISOString().slice(0, 10)}.jsonl`);
+    if (!existsSync(f)) return null;
+    const size = statSync(f).size, len = Math.min(size, 3_000_000), buf = Buffer.alloc(len), fd = openSync(f, "r");
+    try { readSync(fd, buf, 0, len, size - len); } finally { closeSync(fd); }
+    let v60 = 0, d60 = 0, v300 = 0, d300 = 0, first = null, last = null, bid = null, ask = null;
+    for (const ln of buf.toString("utf8").split("\n").slice(1)) {
+      if (!ln.startsWith('{"r"')) continue; let o; try { o = JSON.parse(ln); } catch { continue; }
+      if (o.k === "q" && o.d?.bb && Date.parse(o.d.ts) <= nowMs) { bid = o.d.bb; ask = o.d.ba; continue; }
+      if (o.k !== "t") continue;
+      for (const [tsx, p, vol, ty] of o.d) { const t = Date.parse(tsx); if (t < nowMs - 300_000 || t > nowMs) continue; const sd = ty === 0 ? 1 : -1; v300 += vol; d300 += vol * sd; if (t >= nowMs - 60_000) { v60 += vol; d60 += vol * sd; } if (first === null) first = p; last = p; }
+    }
+    if (v300 < 20) return null; const sg = isLong ? 1 : -1;
+    return { flow60: v60 ? +(sg * d60 / v60).toFixed(3) : 0, flow300: +(sg * d300 / v300).toFixed(3), vol60: v60, vol300: v300, run300: last != null && first != null ? +(last - first).toFixed(2) : null, bid, ask };
+  } catch { return null; }
+}
+function logEntryFlow(sig, dir, contracts) {
+  try { appendFileSync(FLOW_LOG, JSON.stringify({ t: new Date().toISOString(), signal: sig.id, dir, contracts, sigPrice: sig.price ?? null, flow: flowSnapshot(dir === "long") }) + "\n"); } catch {}
 }
 
 function logBlockedSignal(sig, dir, blockedBy) {
@@ -4080,6 +4106,7 @@ function runEvaluate() {
       // via an immediate lookahead scan (the bug that sank the standalone scripts).
       simulateEntryReplay(sig.id, dir, entryTradeOpts);
     } else {
+      logEntryFlow(sig, dir, sizedContracts);   // order-flow snapshot just before the order (exploration log only)
       placeEntry(sig.id, dir === "long", sizedContracts, entryTradeOpts).then(result => {
         // placeEntry returns null when skipped (e.g. stop too wide) — release gate immediately
         if (result === null) state.activeDirections.delete(dir);
