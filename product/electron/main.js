@@ -87,7 +87,7 @@ let activeConfig     = null;
 // list that matches nothing. Fixes every existing broken install too, not
 // just new ones, without requiring the user to redo setup.
 const NQ_DEFAULT_STRATEGIES = [
-  "NQ_AM_VWAP_FADE_S", "NQ_ADR_FADE_S", "NQ_14H_REV_S",
+  "NQ_AM_VWAP_FADE_S", "NQ_ADR_FADE_S",
   "NQ_FIRST30_FADE_S", "NQ_OVERNIGHT_TRAP_S", "NQ_SPIKEDIP_L", "NQ_SPIKEDIP_S", "NQ_PRIORDAY_L", "NQ_PRIORDAY_S",
 ];
 
@@ -355,6 +355,7 @@ function startAccount(account, config) {
     SCALE_EDGE_DAY_CAP_ALL:       "1",   // Combine accounts too, not just funded
     STOP_MODE:          t.stopMode ?? "trail",
     STOP_LOSS_TICKS:    String(t.stopLossTicks),
+    STRATEGY_CONTRACT_STEPUP: "NQ_SPIKEDIP_L:3500:2,NQ_SPIKEDIP_S:3500:2",   // same G step-up as the owner: 2 contracts once the cushion is $3,500
     STRATEGY_MIN_CUSHION: "NQ_PRIORDAY_L:3000,NQ_PRIORDAY_S:3000",   // same lock as the owner: prior-day break risks $300-1,000 per contract
     MAX_STOP_TICKS:     "150",   // same as the owner's engine: NQ_SPIKEDIP uses its own wider stop (~60-70t); the fades are forced to 12t anyway
     TAKE_PROFIT_TICKS:  String(t.takeProfitTicks),

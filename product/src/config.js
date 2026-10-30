@@ -111,8 +111,8 @@ const NQ_DEFAULT_ON_STRATEGIES = {
 };
 
 // The Friends & Family bot always runs the SAME strategy set as the owner's personal bot. These are applied on EVERY launch
-// (not once), so a new release changes what every install trades. NQ_PM_VWAP_FADE_S was pulled 2026-10-25 (0 wins in its last 5 live trades).
-const NQ_MANAGED_STRATEGIES = { ...NQ_DEFAULT_ON_STRATEGIES, NQ_PM_VWAP_FADE_S: false };
+// (not once), so a new release changes what every install trades. NQ_PM_VWAP_FADE_S was pulled 2026-10-25 (0 wins in its last 5 live trades); NQ_14H_REV_S pulled 2026-10-30.
+const NQ_MANAGED_STRATEGIES = { ...NQ_DEFAULT_ON_STRATEGIES, NQ_PM_VWAP_FADE_S: false, NQ_14H_REV_S: false };  // 14H reversal pulled 2026-10-30 (1 win in 11 live trades)
 
 /**
  * Apply forward-migrations to a merged config object in place.

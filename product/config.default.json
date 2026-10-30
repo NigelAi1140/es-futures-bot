@@ -41,7 +41,7 @@
   "strategies": {
     "NQ_AM_VWAP_FADE_S":   true,
     "NQ_ADR_FADE_S":       true,
-    "NQ_14H_REV_S":        true,
+    "NQ_14H_REV_S":        false,
     "NQ_FIRST30_FADE_S":   true,
     "NQ_OVERNIGHT_TRAP_S": true,
     "NQ_SPIKEDIP_L":       true,

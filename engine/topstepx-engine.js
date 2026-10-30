@@ -919,6 +919,14 @@ function parseMinCushion(env) {
   return out;
 }
 
+// STRATEGY_CONTRACT_STEPUP="NQ_SPIKEDIP_L:3500:2,NQ_SPIKEDIP_S:3500:2": once the account has at least `min` dollars above its loss floor,
+// that strategy's per-signal contract cap (sig.maxContracts) rises to `cap`. Below it the signal's own cap applies.
+function parseStepUp(env) {
+  const out = {};
+  for (const part of String(env || "").split(",")) { const [id, min, cap] = part.split(":").map(x => x.trim()); if (id && +min > 0 && +cap >= 1) out[id] = { min: +min, cap: +cap }; }
+  return out;
+}
+
 // ─── Config ───────────────────────────────────────────────────────────────────
 const CFG = {
   userName:       process.env.TV_USER       || "",
@@ -943,6 +951,7 @@ const CFG = {
   // override, or explicitly to the string "off" to opt back into the
   // bar-anchored model (not recommended).
   strategyMinCushion: parseMinCushion(process.env.STRATEGY_MIN_CUSHION),
+  strategyStepUp: parseStepUp(process.env.STRATEGY_CONTRACT_STEPUP),
   forceFixedStopTicks: process.env.FORCE_FIXED_STOP_TICKS === "off" ? null : parseInt(process.env.FORCE_FIXED_STOP_TICKS || "10"),
   maxStopTicks:   parseInt(process.env.MAX_STOP_TICKS    || "25"),  // skip trade if bar range would push SL > this many ticks from fill
   trailTicks:     parseInt(process.env.TRAIL_TICKS       || "8"),
@@ -4046,7 +4055,10 @@ function runEvaluate() {
     state.activeDirections.add(dir);
     if (dir === "long") state.sessionLongCount++;
     // sig.maxContracts: optional per-signal cap (NQ_SPIKEDIP is held at 1 contract while it is forward-tested)
-    const sizedContracts = Math.min(riskCappedContracts(contracts, estimateStopTicks(sig, dir === "long")), sig.maxContracts ?? Infinity);
+    let sigCap = sig.maxContracts ?? Infinity;
+    const stepUp = CFG.strategyStepUp[sig.id];
+    if (stepUp && (state.balance ?? NaN) - mllFloor(state.eodPeakBalance ?? state.peakBalance) >= stepUp.min) sigCap = Math.max(sigCap === Infinity ? 0 : sigCap, stepUp.cap);
+    const sizedContracts = Math.min(riskCappedContracts(contracts, estimateStopTicks(sig, dir === "long")), sigCap);
     const entryTradeOpts = {
       stopTicks: sig.stopTicks ?? CFG.stopTicks,  // per-strategy stop override
       tpTicks:   sig.tpTicks   ?? CFG.tpTicks,   // per-strategy TP override from strategies.js
