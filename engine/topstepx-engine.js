@@ -1442,7 +1442,7 @@ async function resolveContract() {
 }
 
 // ─── Historical bars ──────────────────────────────────────────────────────────
-async function fetchBars(limit = 300, partial = false, lookbackHours = 48) {
+async function fetchBars(limit = 300, partial = false, lookbackHours = 48, quiet = false) {
   const now   = new Date();
   const start = new Date(now - lookbackHours * 60 * 60 * 1000); // default 48h; boot uses 720h (30 days)
 
@@ -1485,7 +1485,7 @@ async function fetchBars(limit = 300, partial = false, lookbackHours = 48) {
 
   const latest = state.bars.at(-1);
   const latestStr = latest ? new Date(latest.time * 1000).toISOString() : "none (market closed/weekend)";
-  console.log(`[Bars] ${state.bars.length} bars loaded (latest: ${latestStr})`);
+  if (!quiet) console.log(`[Bars] ${state.bars.length} bars loaded (latest: ${latestStr})`);
 
   // Staleness check — found 2026-10-05: a signal fired using a bar that was already
   // one full 5m bucket old (TopstepX served it that way, not a bug in our request —
@@ -1496,7 +1496,7 @@ async function fetchBars(limit = 300, partial = false, lookbackHours = 48) {
   if (!partial && latest) {
     const nowHM = now.getUTCHours() * 100 + now.getUTCMinutes();
     const inSession = (nowHM >= 1330 && nowHM < 1500) || (nowHM >= 1800 && nowHM < 2000);
-    if (inSession) {
+    if (inSession && !quiet) {
       const barClosedAt = latest.time * 1000 + 5 * 60 * 1000;
       const staleMs = now.getTime() - barClosedAt;
       if (staleMs > 2 * 60 * 1000) {
@@ -4807,6 +4807,24 @@ async function tick() {
     // stop. Neither call needs to happen before evaluation, so they're deferred
     // to run after the order is already in, instead of in front of it.
     await fetchBars(300, false, 96).catch(console.error);  // 96h spans Mon AM weekend gap
+    // RETRY FIX (2026-10-31): TopstepX does not serve the bar that JUST closed in the first seconds after the boundary, so every evaluation used the bar before it
+    // and entries ran one 5m bar late (the spike-dip backtest edge vanishes at a 5-minute delay but holds up to about 3 minutes). Inside the trading windows, if the
+    // just-closed bar is missing, keep re-requesting it every BAR_RETRY_EVERY_MS up to BAR_RETRY_MAX_MS, then evaluate on it. If it never shows we fall back to the old
+    // behaviour (evaluate on the previous bar), so this can only be as late as before, never later.
+    {
+      const _d = now.getUTCDay(), _inWin = _d >= 1 && _d <= 5 && ((hm >= 1330 && hm < 1530) || (hm >= 1730 && hm < 2000));
+      const _expected = (now.getTime() - (now.getTime() % 300000)) / 1000 - 300;   // start time of the bar that just closed
+      if (_inWin && process.env.BAR_RETRY !== "0" && (state.bars.at(-1)?.time ?? 0) < _expected) {
+        const _t0 = Date.now(), _every = parseInt(process.env.BAR_RETRY_EVERY_MS || "2000"), _max = parseInt(process.env.BAR_RETRY_MAX_MS || "40000");
+        while (Date.now() - _t0 < _max) {
+          await new Promise(r => setTimeout(r, _every));
+          await fetchBars(300, false, 96, true).catch(() => {});
+          if ((state.bars.at(-1)?.time ?? 0) >= _expected) break;
+        }
+        const _ok = (state.bars.at(-1)?.time ?? 0) >= _expected, _lat = state.bars.at(-1) ? new Date(state.bars.at(-1).time * 1000).toISOString() : "none";
+        console.log(`[Bars] ${_ok ? "✓ just-closed bar arrived" : "⚠️ just-closed bar still missing"} ${((Date.now() - _t0) / 1000).toFixed(1)}s after the boundary (retry fix) — ${_ok ? "evaluating on it" : "falling back to the previous bar"} (latest ${_lat})`);
+      }
+    }
     runEvaluate();
     if (state.bars.length > 0) checkSlPostMortems(state.bars);
     reconcilePositions().catch(console.error);
