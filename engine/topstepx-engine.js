@@ -4742,6 +4742,33 @@ async function weeklyRecap() {
   await notify("📅 Weekly recap", body, "default");
 }
 
+// ─── Bar-latency probe (read-only diagnostic, 2026-10-31) ─────────────────────────────────────────────────────────
+// The engine evaluates in the first 10 s after each 5m boundary but TopstepX serves the bar that JUST closed late: every evaluation so far used the
+// bar before it (the "[Bars] STALE" warnings), i.e. live entries run one 5m bar behind every backtest. This probe measures how many seconds after the
+// boundary the just-closed bar actually appears (non-partial request), and whether a partial-bar request already contains it, so the fix can be designed
+// from data. Writes bar-latency-<account>.jsonl. Never touches state.bars and never delays an order (fire-and-forget after evaluation).
+const LATENCY_LOG = resolve(LOGS_DIR, `bar-latency-${SAFE_ACCOUNT_ID}.jsonl`);
+async function barLatencyProbe(boundaryMs) {
+  try {
+    const expected = boundaryMs / 1000 - 300, rows = [];
+    const fetchLatest = async partial => {
+      const data = await apiPost("/api/History/retrieveBars", { contractId: state.contractId, live: !state.simulated, startTime: new Date(Date.now() - 20 * 60 * 1000).toISOString(), endTime: new Date().toISOString(), unit: 2, unitNumber: 5, limit: 4, includePartialBar: partial });
+      const bars = (data.bars ?? []).map(b => ({ t: new Date(b.t).getTime() / 1000, c: +b.c, v: b.v }));
+      return { latest: bars.length ? Math.max(...bars.map(b => b.t)) : null, exp: bars.find(b => b.t === expected) ?? null };
+    };
+    let partialInfo = null;
+    for (const off of [1, 2, 3, 5, 8, 12, 20, 30]) {
+      const wait = boundaryMs + off * 1000 - Date.now(); if (wait > 0) await new Promise(r => setTimeout(r, wait));
+      if (off === 1) { const p = await fetchLatest(true); partialInfo = { partialHasExpected: !!p.exp, partialExpectedClose: p.exp?.c ?? null, partialExpectedVol: p.exp?.v ?? null }; }
+      const r = await fetchLatest(false);
+      const seen = r.latest != null && r.latest >= expected;
+      rows.push({ off, latest: r.latest ? new Date(r.latest * 1000).toISOString() : null, seen, close: r.exp?.c ?? null, vol: r.exp?.v ?? null });
+      if (seen) break;
+    }
+    appendFileSync(LATENCY_LOG, JSON.stringify({ boundary: new Date(boundaryMs).toISOString(), expectedBar: new Date(expected * 1000).toISOString(), firstSeenAfterSec: rows.find(r => r.seen)?.off ?? null, ...partialInfo, probes: rows }) + "\n");
+  } catch {}
+}
+
 // ─── Minute tick loop ─────────────────────────────────────────────────────────
 let lastBar5Min  = -1;   // tracks the 5-min bucket last evaluated (multiples of 5)
 let lastBar15Min = -1;
@@ -4784,6 +4811,7 @@ async function tick() {
     if (state.bars.length > 0) checkSlPostMortems(state.bars);
     reconcilePositions().catch(console.error);
     fetchESBars().catch(console.error);
+    { const d = now.getUTCDay(); if (d >= 1 && d <= 5 && ((hm >= 1330 && hm < 1530) || (hm >= 1730 && hm < 2000))) barLatencyProbe(now.getTime() - (now.getTime() % 300000)).catch(() => {}); }   // read-only diagnostic, after evaluation
   }
 
   // ── Post-boot re-evaluate: fires once if a trade closed while engine was down ──
