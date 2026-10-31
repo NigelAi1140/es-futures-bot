@@ -747,6 +747,30 @@ function logBlockedSignal(sig, dir, blockedBy) {
   }
 }
 
+// ─── Structured gate-block log (2026-10-31): every signal a gate stops, with its plan, so it can be scored on the tape afterwards ─────
+// gate-blocks-<account>.jsonl: {t, bar (signal bar close), signal, dir, price, stopTicks (effective), tpTicks, gate, detail}. Score with gate-review.mjs.
+const GATE_LOG = resolve(LOGS_DIR, `gate-blocks-${SAFE_ACCOUNT_ID}.jsonl`);
+function logGateBlock(sig, gate, detail = "") {
+  try {
+    const lastBar = state.bars.at(-1);
+    appendFileSync(GATE_LOG, JSON.stringify({
+      t: new Date().toISOString(), bar: lastBar ? new Date((lastBar.time + 300) * 1000).toISOString() : null,
+      signal: sig.id, dir: sig.side, price: sig.price ?? null,
+      stopTicks: (CFG.forceFixedStopTicks != null && !sig.useOwnStop) ? CFG.forceFixedStopTicks : (sig.stopTicks ?? CFG.stopTicks),
+      tpTicks: sig.tpTicks ?? CFG.tpTicks, gate, detail,
+    }) + "\n");
+  } catch {}
+}
+let _lastSkipLog = "";
+function logEvalSkipped(reason) {   // whole evaluation skipped (halt, news window, cooldown...) -> no signals exist to score, but we record when and why
+  try {
+    const n = new Date(), hm = n.getUTCHours() * 100 + n.getUTCMinutes();
+    if (!((hm >= 1345 && hm < 1530) || (hm >= 1730 && hm < 2000))) return;
+    const key = reason + n.toISOString().slice(0, 15); if (key === _lastSkipLog) return; _lastSkipLog = key;
+    appendFileSync(GATE_LOG, JSON.stringify({ t: n.toISOString(), evalSkipped: reason }) + "\n");
+  } catch {}
+}
+
 // ─── Manual-trade stand-aside (opt-in: ALLOW_MANUAL_TRADES=1) ────────────────
 // The user sometimes trades by hand on this same account. With this on, an exchange position the
 // engine did NOT open is left alone by the watchdog, and new signals are skipped (with a phone
@@ -3852,12 +3876,12 @@ function currentATR() {
 
 function runEvaluate() {
   if (state.bars.length < 210)          { return; }  // strategies need 210 bars for EMA200 warmup
-  if (state.haltedToday)                { return; }
-  if (state.profitCappedToday)          { return; }  // Topstep consistency cap
-  if (Date.now() < state.cooldownUntil) { return; }
+  if (state.haltedToday)                { logEvalSkipped("halted for the day (daily loss limit)"); return; }
+  if (state.profitCappedToday)          { logEvalSkipped("daily profit cap reached"); return; }  // Topstep consistency cap
+  if (Date.now() < state.cooldownUntil) { logEvalSkipped("engine cooldown"); return; }
   if (isTodayWeekend())                 { return; }  // no regular session on weekends
   if (isTodayHoliday())                 { return; }  // market closed
-  if (isNewsBlocked())                  { return; }  // Tier-1 news window
+  if (isNewsBlocked())                  { logEvalSkipped("Tier-1 news window"); return; }  // Tier-1 news window
 
   const now = new Date();
   const hm  = now.getUTCHours() * 100 + now.getUTCMinutes();
@@ -3991,7 +4015,7 @@ function runEvaluate() {
 
   for (const sig of signals) {
     // Paused strategy gate — skip any signal whose id starts with a paused prefix
-    if (CFG.pausedStrategies.some(p => sig.id.startsWith(p))) continue;
+    if (CFG.pausedStrategies.some(p => sig.id.startsWith(p))) { logGateBlock(sig, "paused (retired or disabled)"); continue; }
 
     // Per-signal stop cooldown: 15 min after a stop loss, same signal can't re-fire.
     // Prevents double-entry on choppy bars where the signal fires again within minutes.
@@ -3999,6 +4023,7 @@ function runEvaluate() {
     if (_lastStop && _now - _lastStop < _stopCooldownMs) {
       const _rem = Math.ceil((_stopCooldownMs - (_now - _lastStop)) / 60000);
       console.log(`[Cooldown] ${sig.id} skipped — ${_rem}min remaining in post-stop cooldown`);
+      logGateBlock(sig, "post-stop cooldown", `${_rem}min left`);
       continue;
     }
 
@@ -4018,12 +4043,13 @@ function runEvaluate() {
     const dir = sig.side === "long" ? "long" : "short";  // strategies.js always uses sig.side
     // Trend-day direction filter — AM only. PM accuracy tested at 46-51% (coin flip),
     // so suppression is disabled in PM to avoid blocking profitable counter-trend signals.
-    if (inAM && state.noShortsToday && dir === "short" && !sig.ignoreTrendFilter) continue;
+    if (inAM && state.noShortsToday && dir === "short" && !sig.ignoreTrendFilter) { logGateBlock(sig, "trend-day gate (no shorts today)"); continue; }
     // noLongsToday gate: bypass once if the first long already won (momentum confirmation)
     if (inAM && state.noLongsToday && dir === "long" && !sig.ignoreTrendFilter) {
       if (state.sessionLongWon && state.sessionLongCount < 2) {
         console.log(`[Gate] 🟢 noLongsToday bypassed — first long won, allowing 2nd (${sig.id})`);
       } else {
+        logGateBlock(sig, "trend-day gate (no longs today)");
         continue;
       }
     }
@@ -4032,6 +4058,7 @@ function runEvaluate() {
     // strategies have 13% WR (-$63/tr avg across 4.5yr backtest) — suppress them.
     if (state.upPctOverbought && CFG.overboughtSuppressSet.has(sig.id)) {
       console.log(`[Gate] 📉 upPctOverbought — trending strat blocked (${sig.id})`);
+      logGateBlock(sig, "overbought persistence gate");
       continue;
     }
 
@@ -4043,6 +4070,7 @@ function runEvaluate() {
       const earlyMove = (state.bars.at(-1)?.close ?? state.amSessionOpenPrice) - state.amSessionOpenPrice;
       if (earlyMove >= CFG.earlyAMUptrendPts) {
         console.log(`[Trend] ↑ Early-AM short blocked — move +${earlyMove.toFixed(2)}pts >= ${CFG.earlyAMUptrendPts}pt early gate (${sig.id})`);
+        logGateBlock(sig, "early-AM short gate", `+${earlyMove.toFixed(2)}pts from the AM open`);
         continue;
       }
     }
@@ -4051,18 +4079,21 @@ function runEvaluate() {
     if (minCushion) {
       const cushion = (state.balance ?? NaN) - mllFloor(state.eodPeakBalance ?? state.peakBalance);
       if (!(cushion >= minCushion)) {
+        logGateBlock(sig, "cushion lock", `cushion ${Number.isFinite(cushion) ? cushion.toFixed(0) : "?"} < ${minCushion}`);
         const lk = `${sig.id}:${new Date().toISOString().slice(0, 10)}`;
         if (!(state._cushionLockLogged ??= new Set()).has(lk)) { state._cushionLockLogged.add(lk); console.log(`[Gate] 🔒 ${sig.id} locked — cushion $${Number.isFinite(cushion) ? cushion.toFixed(0) : "?"} is below the $${minCushion} needed (signal skipped)`); }
         continue;
       }
     }
     if (manualPositionOpen()) {
+      logGateBlock(sig, "manual trade open (stand-aside)");
       standAsideForManual(sig, dir, contracts);
       continue;  // user is in a manual trade — notify instead of entering
     }
     if (state.activeDirections.has(dir)) {
       const blocker = [...state.openTrades.values()].find(t => !t.isProtective && t.isLong === (dir === "long"));
       logBlockedSignal(sig, dir, blocker?.signalId ?? "unknown");
+      logGateBlock(sig, "same direction already open", blocker?.signalId ?? "");
       continue;  // direction gate (same direction already open)
     }
 
@@ -4074,6 +4105,7 @@ function runEvaluate() {
     const oppositeDir5m = dir === "long" ? "short" : "long";
     if (state.activeDirections.has(oppositeDir5m)) {
       console.log(`[Gate] Skipping ${sig.id} ${dir.toUpperCase()} — ${oppositeDir5m} already active (opposing gate)`);
+      logGateBlock(sig, "opposite direction already open");
       continue;
     }
 
