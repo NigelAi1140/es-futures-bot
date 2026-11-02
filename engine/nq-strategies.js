@@ -452,8 +452,9 @@ export const evaluateNQ = (bars, _esBars = []) => {
         }
         if (hit) {
           _spikeDipFired.add(today);
-          const stopTicks = Math.max(12, Math.ceil((0.2 * U) / TICK));
-          signals.push({ id: sp > 0 ? 'NQ_SPIKEDIP_L' : 'NQ_SPIKEDIP_S', side: sp > 0 ? 'long' : 'short', price: c, stopTicks, tpTicks: 2 * stopTicks, stopType: 'ticks', useOwnStop: true, ignoreTrendFilter: true, ignoreEarlyAMGate: true, maxContracts: 1 });
+          // SPIKEDIP_STOP_MULT (default 1 = unchanged): widens ONLY the stop; the target stays at 2 x the base stop (this is what the Gw shadow test measures).
+          const baseStop = Math.max(12, Math.ceil((0.2 * U) / TICK)), stopMult = parseFloat(process.env.SPIKEDIP_STOP_MULT || "1") || 1, stopTicks = Math.round(baseStop * stopMult);
+          signals.push({ id: sp > 0 ? 'NQ_SPIKEDIP_L' : 'NQ_SPIKEDIP_S', side: sp > 0 ? 'long' : 'short', price: c, stopTicks, tpTicks: 2 * baseStop, stopType: 'ticks', useOwnStop: true, ignoreTrendFilter: true, ignoreEarlyAMGate: true, maxContracts: 1 });
           break;
         }
       }
