@@ -2758,8 +2758,9 @@ async function placeEntry(signalId, isLong, contracts, tradeOpts = {}) {
 
   // Reject trades where the bar range pushes the stop too far — bad R:R and backtest mismatch.
   // e.g. a 13.5-pt bar gives slTicks=64 against a 40t TP — skip it.
-  if (stopType === "fixed" && Math.abs(slTicks) > CFG.maxStopTicks) {
-    console.log(`[Order] ⛔ ${signalId} skipped — stop ${Math.abs(slTicks)}t exceeds max ${CFG.maxStopTicks}t (bar too wide)`);
+  const _maxStop = tradeOpts.maxStopTicks ?? CFG.maxStopTicks;
+  if (stopType === "fixed" && Math.abs(slTicks) > _maxStop) {
+    console.log(`[Order] ⛔ ${signalId} skipped — stop ${Math.abs(slTicks)}t exceeds max ${_maxStop}t (bar too wide)`);
     return null;
   }
 
@@ -4130,6 +4131,7 @@ function runEvaluate() {
       // signal families with no way to exempt them; this makes that explicit instead
       // of implicit the next time a signal needs its own stop distance.
       useOwnStop: sig.useOwnStop === true,
+      maxStopTicks: sig.maxStopTicks,   // optional per-signal stop ceiling (NQ_SPIKEDIP); falls back to CFG.maxStopTicks
     };
     if (REPLAY_MODE) {
       // No real order, no real fill event -- record the pending position and let
@@ -4181,7 +4183,7 @@ function simulateEntryReplay(signalId, dir, tradeOpts) {
   } else {
     slTicks = isLong ? -stopTicks : stopTicks;
   }
-  if (Math.abs(slTicks) > CFG.maxStopTicks) {
+  if (Math.abs(slTicks) > (tradeOpts.maxStopTicks ?? CFG.maxStopTicks)) {
     state.activeDirections.delete(dir); // matches placeEntry's real "skipped" release
     return;
   }

@@ -357,7 +357,8 @@ function startAccount(account, config) {
     STOP_LOSS_TICKS:    String(t.stopLossTicks),
     STRATEGY_CONTRACT_STEPUP: "NQ_SPIKEDIP_L:3500:2,NQ_SPIKEDIP_S:3500:2",   // same G step-up as the owner: 2 contracts once the cushion is $3,500
     STRATEGY_MIN_CUSHION: "NQ_PRIORDAY_L:3000,NQ_PRIORDAY_S:3000",   // same lock as the owner: prior-day break risks $300-1,000 per contract
-    MAX_STOP_TICKS:     "150",   // same as the owner's engine: NQ_SPIKEDIP uses its own wider stop (~60-70t); the fades are forced to 12t anyway
+    SPIKEDIP_STOP_MULT: "1.5",   // spike-dip (G) runs a 1.5x wider stop with the same target (user decision 2026-11-02, two-week trial; same as the owner)
+    MAX_STOP_TICKS:     "150",   // global ceiling (same as the owner); NQ_SPIKEDIP carries its own per-signal ceiling of 260 ticks for the 1.5x stop   // same as the owner's engine: NQ_SPIKEDIP uses its own wider stop (~60-70t); the fades are forced to 12t anyway
     TAKE_PROFIT_TICKS:  String(t.takeProfitTicks),
     TRAIL_TICKS:        String(t.trailTicks),
     DAILY_LOSS_LIMIT:   String(copyCap(t) ? Math.min(t.dailyLossLimit, copyCap(t).lossLimit) : t.dailyLossLimit),
