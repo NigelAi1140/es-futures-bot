@@ -4815,7 +4815,7 @@ async function tick() {
       const _d = now.getUTCDay(), _inWin = _d >= 1 && _d <= 5 && ((hm >= 1330 && hm < 1530) || (hm >= 1730 && hm < 2000));
       const _expected = (now.getTime() - (now.getTime() % 300000)) / 1000 - 300;   // start time of the bar that just closed
       if (_inWin && process.env.BAR_RETRY !== "0" && (state.bars.at(-1)?.time ?? 0) < _expected) {
-        const _t0 = Date.now(), _every = parseInt(process.env.BAR_RETRY_EVERY_MS || "2000"), _max = parseInt(process.env.BAR_RETRY_MAX_MS || "40000");
+        const _t0 = Date.now(), _every = parseInt(process.env.BAR_RETRY_EVERY_MS || "1000"), _max = parseInt(process.env.BAR_RETRY_MAX_MS || "40000");
         while (Date.now() - _t0 < _max) {
           await new Promise(r => setTimeout(r, _every));
           await fetchBars(300, false, 96, true).catch(() => {});
