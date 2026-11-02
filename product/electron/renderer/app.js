@@ -707,7 +707,7 @@ async function saveSettings() {
 
   const trading = {
     ...(state.fullConfig?.trading ?? {}),
-    stopMode:           null,
+    stopMode:           "fixed",
     dailyLossLimit:     numVal("cfg-daily-loss"),
     dailyProfitCap:     numVal("cfg-profit-cap"),
     contracts:          numVal("cfg-contracts"),

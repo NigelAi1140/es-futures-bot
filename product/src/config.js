@@ -144,8 +144,10 @@ function migrateConfig(cfg) {
 
   // v1.1.19: stopMode "trail" was overriding all strategy-level fixed stops.
   // Correct value is null (let each strategy decide).
-  if (cfg.trading?.stopMode === "trail") {
-    cfg.trading.stopMode = null;
+  // v1.2.52: the stop is ALWAYS fixed (the 12-tick forced stop with per-setup targets). null used to be sent to the engine as "trail" and trade a 6-tick
+  // trailing stop; normalise null/"trail" to "fixed" for every install.
+  if (cfg.trading && cfg.trading.stopMode !== "fixed") {
+    cfg.trading.stopMode = "fixed";
     changed = true;
   }
 

@@ -272,7 +272,7 @@ function startAlpacaEngine(config) {
     ALPACA_PAPER:       "true",
     SYMBOL:             config.broker.alpacaSymbol ?? "SPY",
     MAX_CONTRACTS:      String(t.contracts),
-    STOP_MODE:          t.stopMode ?? "trail",
+    STOP_MODE:          "fixed",   // v1.2.52: was (t.stopMode ?? "trail"); saving Settings wrote stopMode:null, which silently turned every trade into a 6-tick TRAILING stop (small exits, targets rarely reached)
     STOP_LOSS_TICKS:    String(t.stopLossTicks),
     TAKE_PROFIT_TICKS:  String(t.takeProfitTicks),
     TRAIL_TICKS:        String(t.trailTicks),
@@ -353,7 +353,7 @@ function startAccount(account, config) {
     SCALE_EDGE_DAY_CAP:           t.scaleEdgeDayCap ? "1" : "0",
     SCALE_EDGE_DAY_CAP_CONTRACTS: String(t.scaleEdgeDayCapContracts ?? 2),
     SCALE_EDGE_DAY_CAP_ALL:       "1",   // Combine accounts too, not just funded
-    STOP_MODE:          t.stopMode ?? "trail",
+    STOP_MODE:          "fixed",   // v1.2.52: was (t.stopMode ?? "trail"); saving Settings wrote stopMode:null, which silently turned every trade into a 6-tick TRAILING stop (small exits, targets rarely reached)
     STOP_LOSS_TICKS:    String(t.stopLossTicks),
     STRATEGY_CONTRACT_STEPUP: "NQ_SPIKEDIP_L:3500:2,NQ_SPIKEDIP_S:3500:2",   // same G step-up as the owner: 2 contracts once the cushion is $3,500
     STRATEGY_MIN_CUSHION: "NQ_PRIORDAY_L:3000,NQ_PRIORDAY_S:3000",   // same lock as the owner: prior-day break risks $300-1,000 per contract
