@@ -1001,6 +1001,8 @@ const CFG = {
   // override, or explicitly to the string "off" to opt back into the
   // bar-anchored model (not recommended).
   strategyMinCushion: parseMinCushion(process.env.STRATEGY_MIN_CUSHION),
+  // MAX_TRADE_RISK_CUSHION_PCT="30": skip any entry whose worst-case stop loss (stop + ~2t slip, x contracts) exceeds that % of the cushion above the loss floor (added 2026-11-04). Unset/0 = off.
+  maxTradeRiskCushionPct: parseFloat(process.env.MAX_TRADE_RISK_CUSHION_PCT || "0"),
   strategyStepUp: parseStepUp(process.env.STRATEGY_CONTRACT_STEPUP),
   forceFixedStopTicks: process.env.FORCE_FIXED_STOP_TICKS === "off" ? null : parseInt(process.env.FORCE_FIXED_STOP_TICKS || "10"),
   maxStopTicks:   parseInt(process.env.MAX_STOP_TICKS    || "25"),  // skip trade if bar range would push SL > this many ticks from fill
@@ -4084,6 +4086,17 @@ function runEvaluate() {
         logGateBlock(sig, "cushion lock", `cushion ${Number.isFinite(cushion) ? cushion.toFixed(0) : "?"} < ${minCushion}`);
         const lk = `${sig.id}:${new Date().toISOString().slice(0, 10)}`;
         if (!(state._cushionLockLogged ??= new Set()).has(lk)) { state._cushionLockLogged.add(lk); console.log(`[Gate] 🔒 ${sig.id} locked — cushion $${Number.isFinite(cushion) ? cushion.toFixed(0) : "?"} is below the $${minCushion} needed (signal skipped)`); }
+        continue;
+      }
+    }
+    if (CFG.maxTradeRiskCushionPct > 0) {
+      const _stopT = (CFG.forceFixedStopTicks != null && !sig.useOwnStop) ? CFG.forceFixedStopTicks : (sig.stopTicks ?? CFG.stopTicks);
+      const _risk = (_stopT + 2) * 5 * Math.min(contracts || 1, sig.maxContracts ?? 99);
+      const _cush = (state.balance ?? NaN) - mllFloor(state.eodPeakBalance ?? state.peakBalance);
+      if (Number.isFinite(_cush) && _risk > _cush * CFG.maxTradeRiskCushionPct / 100) {
+        logGateBlock(sig, "risk > cushion cap", `risk $${_risk.toFixed(0)} > ${CFG.maxTradeRiskCushionPct}% of cushion $${_cush.toFixed(0)}`);
+        const lk = `${sig.id}:risk:${new Date().toISOString().slice(0, 13)}`;
+        if (!(state._riskCapLogged ??= new Set()).has(lk)) { state._riskCapLogged.add(lk); console.log(`[Gate] 🛡️ ${sig.id} skipped — worst-case loss $${_risk.toFixed(0)} is more than ${CFG.maxTradeRiskCushionPct}% of the $${_cush.toFixed(0)} cushion`); }
         continue;
       }
     }

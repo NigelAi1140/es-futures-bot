@@ -356,6 +356,7 @@ function startAccount(account, config) {
     STOP_MODE:          "fixed",   // v1.2.52: was (t.stopMode ?? "trail"); saving Settings wrote stopMode:null, which silently turned every trade into a 6-tick TRAILING stop (small exits, targets rarely reached)
     STOP_LOSS_TICKS:    String(t.stopLossTicks),
     STRATEGY_CONTRACT_STEPUP: "NQ_SPIKEDIP_L:3500:2,NQ_SPIKEDIP_S:3500:2",   // same G step-up as the owner: 2 contracts once the cushion is $3,500
+    MAX_TRADE_RISK_CUSHION_PCT: "30",   // skip any trade whose worst-case stop loss is over 30% of the cushion above the loss floor
     STRATEGY_MIN_CUSHION: "NQ_PRIORDAY_L:3000,NQ_PRIORDAY_S:3000",   // same lock as the owner: prior-day break risks $300-1,000 per contract
     SPIKEDIP_STOP_MULT: "1.5",   // spike-dip (G) runs a 1.5x wider stop with the same target (user decision 2026-11-02, two-week trial; same as the owner)
     MAX_STOP_TICKS:     "150",   // global ceiling (same as the owner); NQ_SPIKEDIP carries its own per-signal ceiling of 260 ticks for the 1.5x stop   // same as the owner's engine: NQ_SPIKEDIP uses its own wider stop (~60-70t); the fades are forced to 12t anyway
