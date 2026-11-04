@@ -190,9 +190,51 @@ function hourlyATR14(bars, t) {
   return a;
 }
 
+// ─── NQ_SPIKEDIP_L / NQ_SPIKEDIP_S as a standalone function so it can ALSO run alone in the 15:00-15:30 UTC extension (user, 2026-11-03) ───
+function spikeDipSignals(bars, hm, today, c) {
+  const signals = [];
+  // Spike-dip follow (added 2026-10-24, trades WITH the spike) ───────────────
+  // A 5m bar spikes >= 1.0 x U (U = last completed 1h ATR(14)) above/below the lowest/highest of the prior 12 bars (spike bar 14:00-18:00 UTC);
+  // then 2 quiet bars (no new extreme), a lower-high (higher-low) bar, and a close through that bar's low (high) -> enter in the spike direction.
+  // Stop = max(12t, 0.2U) from fill (own stop, NOT the forced 12t), TP 2R, 1 trade/day. Same rules as shadow setup G (engine/shadow-setups.mjs).
+  // Backtest 2026-09-01..10-23 (1ct): 38 trades, 47% wins, +$154/trade; 2020-26 history about flat — forward test live at 1ct.
+  if (!_spikeDipFired.has(today) && hm >= 1415) {
+    const i = bars.length - 1;
+    for (let n = Math.max(13, i - 14); n <= i - 3 && !_spikeDipFired.has(today); n++) {
+      if (barDate(bars[n].time) !== today) continue;
+      const hmN = barHM(bars[n].time); if (hmN < 1400 || hmN >= 1800) continue;
+      const U = hourlyATR14(bars, bars[n].time); if (!(U > 0)) continue;
+      for (const sp of [1, -1]) {
+        let base = sp > 0 ? Infinity : -Infinity;
+        for (let k = n - 12; k < n; k++) base = sp > 0 ? Math.min(base, bars[k].low) : Math.max(base, bars[k].high);
+        const ext = sp > 0 ? bars[n].high : bars[n].low;
+        if ((sp > 0 ? ext - base : base - ext) < U) continue;
+        let pk = ext, quiet = 0, lh = -1, hit = false;
+        for (let j = n + 1; j <= i; j++) {
+          if (barDate(bars[j].time) !== today) break;
+          const x = sp > 0 ? bars[j].high : bars[j].low;
+          if (sp > 0 ? x > pk : x < pk) { pk = x; quiet = 0; lh = -1; continue; }
+          quiet++; if (quiet < 2) continue;
+          if (lh < 0) { lh = j; continue; }
+          if (sp > 0 ? bars[j].close < bars[lh].low : bars[j].close > bars[lh].high) { hit = j === i; break; }
+        }
+        if (hit) {
+          _spikeDipFired.add(today);
+          // SPIKEDIP_STOP_MULT (default 1 = unchanged): widens ONLY the stop; the target stays at 2 x the base stop (this is what the Gw shadow test measures).
+          const baseStop = Math.max(12, Math.ceil((0.2 * U) / TICK)), stopMult = parseFloat(process.env.SPIKEDIP_STOP_MULT || "1") || 1, stopTicks = Math.round(baseStop * stopMult);
+          signals.push({ id: sp > 0 ? 'NQ_SPIKEDIP_L' : 'NQ_SPIKEDIP_S', side: sp > 0 ? 'long' : 'short', price: c, stopTicks, tpTicks: 2 * baseStop, stopType: 'ticks', useOwnStop: true, ignoreTrendFilter: true, ignoreEarlyAMGate: true, maxContracts: 1, maxStopTicks: 260 });   // per-signal stop ceiling so only G may use the wider stop (the global MAX_STOP_TICKS stays 150)
+          break;
+        }
+      }
+    }
+  }
+
+  return signals;
+}
+
 // ── Main evaluator ────────────────────────────────────────────────────────────
 
-export const evaluateNQ = (bars, _esBars = []) => {
+export const evaluateNQ = (bars, _esBars = [], opts = {}) => {
   if (bars.length < 20) return [];
   const last  = bars[bars.length - 1];
   const prev  = bars[bars.length - 2]; // previous bar (same or different day)
@@ -201,6 +243,7 @@ export const evaluateNQ = (bars, _esBars = []) => {
   const c     = last.close;
 
   _updateRTHCache(bars);
+  if (opts.onlyG) return spikeDipSignals(bars, hm, today, c);   // 15:00-15:30 UTC extension: ONLY the spike-dip follow may trade
   const amClose = amCloseHM(last.time), pmOpen = pmOpenHM(last.time);
   const inAM = hm >= AM_OPEN_HM && hm < amClose;
   const inPM = hm >= pmOpen && hm < PM_CLOSE_HM;
@@ -425,41 +468,7 @@ export const evaluateNQ = (bars, _esBars = []) => {
     }
   }
 
-  // ─── NQ_SPIKEDIP_L / NQ_SPIKEDIP_S — Spike-dip follow (added 2026-10-24, trades WITH the spike) ───────────────
-  // A 5m bar spikes >= 1.0 x U (U = last completed 1h ATR(14)) above/below the lowest/highest of the prior 12 bars (spike bar 14:00-18:00 UTC);
-  // then 2 quiet bars (no new extreme), a lower-high (higher-low) bar, and a close through that bar's low (high) -> enter in the spike direction.
-  // Stop = max(12t, 0.2U) from fill (own stop, NOT the forced 12t), TP 2R, 1 trade/day. Same rules as shadow setup G (engine/shadow-setups.mjs).
-  // Backtest 2026-09-01..10-23 (1ct): 38 trades, 47% wins, +$154/trade; 2020-26 history about flat — forward test live at 1ct.
-  if (!_spikeDipFired.has(today) && hm >= 1415) {
-    const i = bars.length - 1;
-    for (let n = Math.max(13, i - 14); n <= i - 3 && !_spikeDipFired.has(today); n++) {
-      if (barDate(bars[n].time) !== today) continue;
-      const hmN = barHM(bars[n].time); if (hmN < 1400 || hmN >= 1800) continue;
-      const U = hourlyATR14(bars, bars[n].time); if (!(U > 0)) continue;
-      for (const sp of [1, -1]) {
-        let base = sp > 0 ? Infinity : -Infinity;
-        for (let k = n - 12; k < n; k++) base = sp > 0 ? Math.min(base, bars[k].low) : Math.max(base, bars[k].high);
-        const ext = sp > 0 ? bars[n].high : bars[n].low;
-        if ((sp > 0 ? ext - base : base - ext) < U) continue;
-        let pk = ext, quiet = 0, lh = -1, hit = false;
-        for (let j = n + 1; j <= i; j++) {
-          if (barDate(bars[j].time) !== today) break;
-          const x = sp > 0 ? bars[j].high : bars[j].low;
-          if (sp > 0 ? x > pk : x < pk) { pk = x; quiet = 0; lh = -1; continue; }
-          quiet++; if (quiet < 2) continue;
-          if (lh < 0) { lh = j; continue; }
-          if (sp > 0 ? bars[j].close < bars[lh].low : bars[j].close > bars[lh].high) { hit = j === i; break; }
-        }
-        if (hit) {
-          _spikeDipFired.add(today);
-          // SPIKEDIP_STOP_MULT (default 1 = unchanged): widens ONLY the stop; the target stays at 2 x the base stop (this is what the Gw shadow test measures).
-          const baseStop = Math.max(12, Math.ceil((0.2 * U) / TICK)), stopMult = parseFloat(process.env.SPIKEDIP_STOP_MULT || "1") || 1, stopTicks = Math.round(baseStop * stopMult);
-          signals.push({ id: sp > 0 ? 'NQ_SPIKEDIP_L' : 'NQ_SPIKEDIP_S', side: sp > 0 ? 'long' : 'short', price: c, stopTicks, tpTicks: 2 * baseStop, stopType: 'ticks', useOwnStop: true, ignoreTrendFilter: true, ignoreEarlyAMGate: true, maxContracts: 1, maxStopTicks: 260 });   // per-signal stop ceiling so only G may use the wider stop (the global MAX_STOP_TICKS stays 150)
-          break;
-        }
-      }
-    }
-  }
+  signals.push(...spikeDipSignals(bars, hm, today, c));
 
   // ─── NQ_PRIORDAY_L / NQ_PRIORDAY_S — Prior-day high/low break, continuation (added 2026-10-28) ─────────────────
   // A 5m bar CLOSES >= 0.05 U beyond the prior regular-session high (low) after the two previous closes were inside -> enter in the break

@@ -3934,7 +3934,10 @@ function runEvaluate() {
   const pmOpenHM  = edgeDay ? 1730 : 1800;
   const inAM = hm >= 1330 && hm < amCloseHM && (!state.isFOMCDay || isNQ);
   const inPM = hm >= pmOpenHM && hm < 2000 && (!state.isFOMCDay || isNQ) && !isTodayEarlyClose();
-  if (!inAM && !inPM) return;
+  // Spike-dip (G) only: stays eligible until 15:30 UTC every day (Tue-Thu the AM window ends 15:00; Mon/Fri already run to 15:30). Added 2026-11-03: G signals at
+  // 15:00-15:30 UTC were 5 trades / 4 wins / +$532 per trade since Sep 1, and the window still ends before the user's manual window.
+  const inGExt = isNQ && !inAM && !inPM && hm >= 1500 && hm < 1530 && !state.isFOMCDay;
+  if (!inAM && !inPM && !inGExt) return;
 
   // Monday PM filter: skip for NQ V5 (backtest included Monday PM sessions; fade edge is session-agnostic)
   if (inPM && !isNQ && now.getUTCDay() === 1) return;
@@ -3983,7 +3986,7 @@ function runEvaluate() {
 
   let signals;
   try {
-    const mainSigs = isNQ ? evaluateNQ(state.bars, state.esBars) : evaluate(state.bars);
+    const mainSigs = isNQ ? evaluateNQ(state.bars, state.esBars, { onlyG: inGExt }) : evaluate(state.bars);
     const extSigs  = isNQ ? [] : evaluateExtended(state.bars);  // MARKET_STRUCT_S + DAY_BREAK_FAIL_S (ES only)
     signals = [...mainSigs, ...extSigs];
     if (CFG.regimeFilter === "bull") signals = signals.filter(s => s.side === "long");
