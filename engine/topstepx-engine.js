@@ -19,7 +19,7 @@ import axios from "axios";
 import { HubConnectionBuilder, HttpTransportType, LogLevel, HubConnectionState } from "@microsoft/signalr";
 import dotenv from "dotenv";
 import { evaluate, evaluateExtended } from "./strategies.js";
-import { evaluateNQ, resetConfRevState, primeNQHistory } from "./nq-strategies.js";
+import { evaluateNQ, resetConfRevState, primeNQHistory, sessHM, usDSTms } from "./nq-strategies.js";
 import { atr, volumeSMA } from "./indicators.js";
 import { appendFileSync, writeFileSync, openSync, closeSync, unlinkSync, mkdirSync, existsSync, readFileSync, statSync, readSync } from "fs";
 import { execSync, execFileSync } from "child_process";
@@ -764,7 +764,7 @@ function logGateBlock(sig, gate, detail = "") {
 let _lastSkipLog = "";
 function logEvalSkipped(reason) {   // whole evaluation skipped (halt, news window, cooldown...) -> no signals exist to score, but we record when and why
   try {
-    const n = new Date(), hm = n.getUTCHours() * 100 + n.getUTCMinutes();
+    const n = new Date(), hm = sessHM(n);
     if (!((hm >= 1345 && hm < 1530) || (hm >= 1730 && hm < 2000))) return;
     const key = reason + n.toISOString().slice(0, 15); if (key === _lastSkipLog) return; _lastSkipLog = key;
     appendFileSync(GATE_LOG, JSON.stringify({ t: n.toISOString(), evalSkipped: reason }) + "\n");
@@ -901,7 +901,7 @@ function checkSlPostMortems(bars) {
   let stillOpen = list;
   for (const bar of newBars) {
     const d  = new Date(bar.time * 1000);
-    const hm = d.getUTCHours() * 100 + d.getUTCMinutes();
+    const hm = sessHM(d);
     const sessionOver = (hm >= 1500 && hm < 1800) || hm >= 2000;
     const next = [];
     for (const p of stillOpen) {
@@ -1306,7 +1306,7 @@ async function apiPost(path, body = {}) {
 const YIELD_SESSION = process.env.YIELD_SESSION === "1";
 function sessionNeeded(now = new Date()) {
   const dow = now.getUTCDay(); if (dow === 0 || dow === 6) return false;
-  const hm = now.getUTCHours() * 100 + now.getUTCMinutes();
+  const hm = sessHM(now);
   return (hm >= 1250 && hm < 1535) || (hm >= 1725 && hm < 2035);   // AM and PM windows (incl. Mon/Fri widening) + margin
 }
 const engineIsFlat = () => state.openPositionSize === 0 && state.activeDirections.size === 0 && state.openTrades.size === 0 && !state.pendingRetry;
@@ -1494,7 +1494,7 @@ async function fetchBars(limit = 300, partial = false, lookbackHours = 48, quiet
   // (outside that, an old "latest" bar can just mean genuinely no new volume, not staleness)
   // and only on confirmed-closed fetches, not partial-bar ones.
   if (!partial && latest) {
-    const nowHM = now.getUTCHours() * 100 + now.getUTCMinutes();
+    const nowHM = sessHM(now);
     const inSession = (nowHM >= 1330 && nowHM < 1500) || (nowHM >= 1800 && nowHM < 2000);
     if (inSession && !quiet) {
       const barClosedAt = latest.time * 1000 + 5 * 60 * 1000;
@@ -2166,7 +2166,7 @@ function onPositionEvent(pos) {
       state.pendingRetry = null;  // clear immediately — only one attempt ever
 
       const now   = new Date();
-      const hm    = now.getUTCHours() * 100 + now.getUTCMinutes();
+      const hm    = sessHM(now);
       const inAM  = hm >= 1330 && hm < 1455;   // 5 min buffer before AM close at 15:00
       const inPM  = hm >= 1830 && hm < 2025;   // 5 min buffer before PM close at 20:30
       const inSession = inAM || inPM;
@@ -2298,7 +2298,7 @@ function onAccountEvent(acct) {
   // restart must use reconcileMissedTrades() to infer the true start balance from today's
   // closed trades, not the current balance (which already includes today's P&L).
   if (state.startOfDayBalance === null && !state.dayContextRecovered) {
-    const _hm = new Date().getUTCHours() * 100 + new Date().getUTCMinutes();
+    const _hm = sessHM(new Date());
     if (_hm >= 1330 && _hm < 1340) {
       // Right at session open: current balance IS the start balance
       state.startOfDayBalance = bal;
@@ -2404,8 +2404,7 @@ function calcOvernightRange() {
   const cutoff = now - 18 * 3600;
   const bars   = state.bars.filter(b => {
     if (b.time < cutoff) return false;
-    const hm = new Date(b.time * 1000).getUTCHours() * 100 +
-               new Date(b.time * 1000).getUTCMinutes();
+    const hm = sessHM(b.time * 1000);
     // Exclude regular session hours
     return !((hm >= 1330 && hm < 1500) || (hm >= 1800 && hm < 2030));
   });
@@ -3270,7 +3269,7 @@ async function reconcileMissedTrades() {
     // The 2-hour fallback was removed because it could pick up yesterday's PM trades
     // and double-count them (seenTradeIds now persists to disk as a second guard).
     const todaySessionStart = new Date();
-    todaySessionStart.setUTCHours(13, 30, 0, 0);
+    todaySessionStart.setUTCHours(usDSTms(Date.now()) ? 13 : 14, 30, 0, 0);
     if (new Date() < todaySessionStart) return; // nothing to reconcile yet
     const since = todaySessionStart.toISOString();
     const data = await apiPost("/api/Trade/search", {
@@ -3638,7 +3637,7 @@ async function reconcileDayPnL(label) {
       // matches the dollars.
       try {
         const todaySessionStart = new Date();
-        todaySessionStart.setUTCHours(13, 30, 0, 0);
+        todaySessionStart.setUTCHours(usDSTms(Date.now()) ? 13 : 14, 30, 0, 0);
         const tradeData = await apiPost("/api/Trade/search", {
           accountId: state.accountId,
           startTimestamp: todaySessionStart.toISOString(),
@@ -3695,8 +3694,7 @@ async function runnerWatchdog() {
 }
 
 setInterval(() => {
-  const h = new Date().getUTCHours(), m = new Date().getUTCMinutes();
-  const hm = h * 100 + m;
+  const hm = sessHM(new Date());
   const inSession = (hm >= 1340 && hm < 1505) || (hm >= 1825 && hm < 1905);
   if (inSession) runnerWatchdog().catch(() => {});
 }, 5_000);
@@ -3849,7 +3847,7 @@ async function activePositionWatchdog() {
 
 // 60-second active position watchdog — covers AM and PM windows with buffer
 setInterval(() => {
-  const hm = new Date().getUTCHours() * 100 + new Date().getUTCMinutes();
+  const hm = sessHM(new Date());
   // Widened to cover the Mon/Fri 17:30 PM-open edge-day window too (harmless on other days).
   const inRange = (hm >= 1300 && hm < 1530) || (hm >= 1730 && hm < 2030);
   if (inRange) activePositionWatchdog().catch(() => {});
@@ -3885,7 +3883,7 @@ function runEvaluate() {
   if (isNewsBlocked())                  { logEvalSkipped("Tier-1 news window"); return; }  // Tier-1 news window
 
   const now = new Date();
-  const hm  = now.getUTCHours() * 100 + now.getUTCMinutes();
+  const hm  = sessHM(now);
 
   // ── Trend-day filter + gap detection ──────────────────────────────────────
   // Step 1: capture AM session open price (RTH open 13:30 UTC, once per day).
@@ -3894,7 +3892,7 @@ function runEvaluate() {
   // has just opened (0s old) and the API doesn't return it yet as a partial bar.
   if (hm >= 1330 && hm < 1500 && state.amSessionOpenPrice === null && state.bars.length > 0) {
     const todayAMStart = (() => {
-      const d = new Date(); d.setUTCHours(13, 30, 0, 0); return d.getTime() / 1000;
+      const d = new Date(); d.setUTCHours(usDSTms(Date.now()) ? 13 : 14, 30, 0, 0); return d.getTime() / 1000;
     })();
     const firstAMBar = state.bars.find(b => b.time >= todayAMStart);
     if (firstAMBar) {
@@ -3950,7 +3948,7 @@ function runEvaluate() {
   // ATR volatility filter: skip all entries when market is too choppy.
   const curATR = currentATR();
   if (curATR !== null && curATR < CFG.atrMinFilter) {
-    const hm2 = new Date().getUTCHours() * 100 + new Date().getUTCMinutes();
+    const hm2 = sessHM(new Date());
     console.log(`[ATR] ${hm2} UTC — ATR(20)=${curATR.toFixed(2)}pts < ${CFG.atrMinFilter}pts threshold — skipping bar`);
     return;
   }
@@ -3997,7 +3995,7 @@ function runEvaluate() {
   }
 
   {
-    const hm2 = new Date().getUTCHours() * 100 + new Date().getUTCMinutes();
+    const hm2 = sessHM(new Date());
     if (signals.length === 0) {
       console.log(`[Strategy] ${hm2} UTC — evaluated ${state.bars.length} bars, 0 signals`);
     } else {
@@ -4344,7 +4342,7 @@ function runEvaluate15() {
   if (isNewsBlocked())                       { return; }
 
   const now = new Date();
-  const hm  = now.getUTCHours() * 100 + now.getUTCMinutes();
+  const hm  = sessHM(now);
   const isNQ = CFG.contractSearch === "NQ";  // was referenced below without being defined in this scope — ReferenceError on every FOMC day
 
   const inAM = hm >= 1330 && hm < 1500 && (!state.isFOMCDay || isNQ);
@@ -4788,7 +4786,7 @@ async function tick() {
     triggerFullReconnect("resuming after yield").catch(console.error);
   }
   const now = new Date();
-  const hm  = now.getUTCHours() * 100 + now.getUTCMinutes();
+  const hm  = sessHM(now);
   const min = now.getUTCMinutes();
   const sec = now.getUTCSeconds();
 

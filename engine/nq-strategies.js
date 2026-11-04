@@ -100,11 +100,25 @@ export function resetConfRevState() {
   _pullbackFiredS.clear();
 }
 
+// ── Session clock ─────────────────────────────────────────────────────────────
+// Every session window in this bot is written as UTC times for the SUMMER (EDT) cash open, 13:30 UTC = 9:30 ET. When US daylight
+// time ends the cash open moves to 14:30 UTC, so sessHM() returns the UTC clock minus one hour in winter ("summer-equivalent"
+// HHMM). All window checks then keep meaning the same ET moment all year. Fixed 2026-11-04 (windows were an hour early since Nov 1).
+function _nthSunUTC(y, m, n) { const d = new Date(Date.UTC(y, m, 1)); return 1 + ((7 - d.getUTCDay()) % 7) + (n - 1) * 7; }
+export function usDSTms(ms) {
+  const y = new Date(ms).getUTCFullYear();
+  return ms >= Date.UTC(y, 2, _nthSunUTC(y, 2, 2), 7) && ms < Date.UTC(y, 10, _nthSunUTC(y, 10, 1), 6);
+}
+export function sessHM(t) {   // t = Date or epoch ms
+  const ms = t instanceof Date ? t.getTime() : t, d = new Date(ms);
+  let h = d.getUTCHours(); if (!usDSTms(ms)) h = (h + 23) % 24;
+  return h * 100 + d.getUTCMinutes();
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function barHM(ts) {
-  const d = new Date(ts * 1000);
-  return d.getUTCHours() * 100 + d.getUTCMinutes();
+  return sessHM(ts * 1000);
 }
 function barDate(ts) {
   return new Date(ts * 1000).toISOString().slice(0, 10);
@@ -482,7 +496,8 @@ export const evaluateNQ = (bars, _esBars = [], opts = {}) => {
       const mk = (side, level, stopPx) => {
         const stopTicks = Math.max(12, Math.ceil(Math.abs(c - stopPx) / TICK));
         if (stopTicks * TICK > 0.5 * U) return;
-        signals.push({ id: side === 'long' ? 'NQ_PRIORDAY_L' : 'NQ_PRIORDAY_S', side, price: c, stopTicks, tpTicks: 2 * stopTicks, stopType: 'ticks', useOwnStop: true, ignoreTrendFilter: true, ignoreEarlyAMGate: true, maxContracts: 1 });
+        // maxStopTicks 125 (2026-11-04): one stop-out at 125t + 1.9t slip + fees = ~$640, inside the $650 daily loss limit (global cap is 150 = ~$780)
+        signals.push({ id: side === 'long' ? 'NQ_PRIORDAY_L' : 'NQ_PRIORDAY_S', side, price: c, stopTicks, tpTicks: 2 * stopTicks, stopType: 'ticks', useOwnStop: true, ignoreTrendFilter: true, ignoreEarlyAMGate: true, maxContracts: 1, maxStopTicks: 125 });
       };
       if (!_priorDayFiredL.has(today) && c >= pd.hi + 0.05 * U && c1 <= pd.hi && c2 <= pd.hi) { _priorDayFiredL.add(today); mk('long', pd.hi, pd.hi - 0.12 * U); }
       if (!_priorDayFiredS.has(today) && c <= pd.lo - 0.05 * U && c1 >= pd.lo && c2 >= pd.lo) { _priorDayFiredS.add(today); mk('short', pd.lo, pd.lo + 0.12 * U); }
