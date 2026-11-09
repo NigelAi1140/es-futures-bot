@@ -61,6 +61,7 @@ const _momExhFiredS    = new Set();
 const _spikeDipFired   = new Set(); // NQ_SPIKEDIP_L/S: 1 trade/day total (either direction)
 const _priorDayFiredL  = new Set(); // NQ_PRIORDAY_L: 1/day
 const _priorDayFiredS  = new Set(); // NQ_PRIORDAY_S: 1/day
+const _orb15Fired      = new Set(); // NQ_ORB15_FADE_L/S: 1/day total
 const _rthDayCache     = new Map(); // date -> { hi, lo } of the 13:30-20:00 UTC regular session (for NQ_PRIORDAY)
 const _pullbackFiredL  = new Set();
 const _pullbackFiredS  = new Set();
@@ -77,6 +78,7 @@ export function resetConfRevState() {
   _spikeDipFired.clear();
   _priorDayFiredL.clear();
   _priorDayFiredS.clear();
+  _orb15Fired.clear();
   _amVwapFiredL.clear();
   _amVwapFiredS.clear();
   _adrFiredL.clear();
@@ -501,6 +503,21 @@ export const evaluateNQ = (bars, _esBars = [], opts = {}) => {
       };
       if (!_priorDayFiredL.has(today) && c >= pd.hi + 0.05 * U && c1 <= pd.hi && c2 <= pd.hi) { _priorDayFiredL.add(today); mk('long', pd.hi, pd.hi - 0.12 * U); }
       if (!_priorDayFiredS.has(today) && c <= pd.lo - 0.05 * U && c1 >= pd.lo && c2 >= pd.lo) { _priorDayFiredS.add(today); mk('short', pd.lo, pd.lo + 0.12 * U); }
+    }
+  }
+
+  // ─── NQ_ORB15_FADE_L / NQ_ORB15_FADE_S — fade the first 5m CLOSE beyond the 15-min opening range (added 2026-11-08; same rules as shadow setup O) ───
+  // Opening range = the three 5m bars 13:30-13:45 (summer-equivalent clock). The first 5m close (13:45-16:00) above the range high is faded SHORT,
+  // below the range low faded LONG. Stop = max(12t, 0.2 U) from fill (U = last completed 1h ATR(14)), TP 2R, 1 trade/day, 1 contract.
+  // Shadow record at promotion: 6 trades, 3 wins, +$335/trade. Stop is typically 85-175 ticks ($425-875 per contract), so it gets its own maxStopTicks 175.
+  if (!_orb15Fired.has(today) && hm >= 1345 && hm < 1600) {
+    let hi = -Infinity, lo = Infinity, cnt = 0;
+    for (const b of bars) { if (barDate(b.time) !== today) continue; const h = barHM(b.time); if (h >= 1330 && h < 1345) { hi = Math.max(hi, b.high); lo = Math.min(lo, b.low); cnt++; } }
+    const U = cnt >= 3 ? hourlyATR14(bars, last.time) : null;
+    if (U > 0 && (c > hi || c < lo)) {
+      _orb15Fired.add(today);
+      const up = c > hi, stopTicks = Math.max(12, Math.ceil((0.2 * U) / TICK));
+      signals.push({ id: up ? 'NQ_ORB15_FADE_S' : 'NQ_ORB15_FADE_L', side: up ? 'short' : 'long', price: c, stopTicks, tpTicks: 2 * stopTicks, stopType: 'ticks', useOwnStop: true, ignoreTrendFilter: true, ignoreEarlyAMGate: true, maxContracts: 1, maxStopTicks: 175 });
     }
   }
 

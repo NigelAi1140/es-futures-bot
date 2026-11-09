@@ -88,7 +88,7 @@ let activeConfig     = null;
 // just new ones, without requiring the user to redo setup.
 const NQ_DEFAULT_STRATEGIES = [
   "NQ_AM_VWAP_FADE_S", "NQ_ADR_FADE_S",
-  "NQ_FIRST30_FADE_S", "NQ_OVERNIGHT_TRAP_S", "NQ_SPIKEDIP_L", "NQ_SPIKEDIP_S", "NQ_PRIORDAY_L", "NQ_PRIORDAY_S",
+  "NQ_FIRST30_FADE_S", "NQ_SPIKEDIP_L", "NQ_SPIKEDIP_S", "NQ_PRIORDAY_L", "NQ_PRIORDAY_S", "NQ_ORB15_FADE_L", "NQ_ORB15_FADE_S",
 ];
 
 // ── Create main dashboard window ──────────────────────────────────────────────
